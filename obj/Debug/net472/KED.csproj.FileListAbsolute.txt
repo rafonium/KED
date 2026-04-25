@@ -1,0 +1,9 @@
+C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.csproj.AssemblyReference.cache
+C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.AssemblyInfoInputs.cache
+C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.AssemblyInfo.cs
+C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.csproj.CoreCompileInputs.cache
+C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\bin\Debug\net472\KED.dll
+C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\bin\Debug\net472\KED.pdb
+C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.dll
+C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.pdb
