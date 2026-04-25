@@ -202,8 +202,9 @@ namespace KerbalEngineDynamics
         private float checkTimer = 0f;
         private float uiUpdateTimer = 0f;
         private List<float> originalMaxThrusts = new List<float>();
+        private static readonly HashSet<string> HypergolicPropellants = new HashSet<string> { "Aerozine50", "NTO", "MMH", "UDMH", "NitricAcid", "Hydrazine" };
 
-        public enum EngineArchetype { Thermodynamic, Monopropellant, Solid }
+        public enum EngineArchetype { Thermodynamic, Monopropellant, Solid, Hypergolic }
         private EngineArchetype currentArchetype;
 
         public override void OnStart(StartState state)
@@ -244,8 +245,19 @@ namespace KerbalEngineDynamics
             if (engines.Count == 0) return;
             // We use the first module to determine archetype for the whole part
             var e = engines[0];
-            if (e.engineType == EngineType.SolidBooster) currentArchetype = EngineArchetype.Solid;
-            else if (e.propellants.Count == 1 && e.propellants[0].name == "MonoPropellant") currentArchetype = EngineArchetype.Monopropellant;
+            if (e.engineType == EngineType.SolidBooster) { currentArchetype = EngineArchetype.Solid; return; }
+            
+            // Hypergolic Detection: Check for specific propellant pairings
+            foreach (var prop in e.propellants)
+            {
+                if (HypergolicPropellants.Contains(prop.name))
+                {
+                    currentArchetype = EngineArchetype.Hypergolic;
+                    return;
+                }
+            }
+
+            if (e.propellants.Count == 1 && e.propellants[0].name == "MonoPropellant") currentArchetype = EngineArchetype.Monopropellant;
             else currentArchetype = EngineArchetype.Thermodynamic;
         }
 
@@ -362,6 +374,11 @@ namespace KerbalEngineDynamics
                 float wear = (block >= 3) ? 0.2f : (block >= 1) ? 0.4f : 0.5f;
                 cumulativeBurnSeconds += wear; 
             }
+            else if (currentArchetype == EngineArchetype.Hypergolic)
+            {
+                // Contact Ignition: 0% risk, no fatigue
+                nextCheckInterval = UnityEngine.Random.Range(10f, 15f);
+            }
         }
 
         private void HandleRunningEvent()
@@ -423,6 +440,24 @@ namespace KerbalEngineDynamics
                     if (UnityEngine.Random.value < risk) SetFailureState(false, 3); // Catalyst Choke (soft)
                 }
             }
+            // Hypergolic Corrosion Check (10s)
+            else if (currentArchetype == EngineArchetype.Hypergolic && checkTimer >= 10f)
+            {
+                checkTimer = 0f;
+                if (block >= 6) return; // Block VI: Infinite Chemical Integrity
+
+                float limit = monoServiceLimitBase * ((block >= 2) ? 1.5f : 1.0f); // Re-use base for simplicity or separate field
+                if (cumulativeBurnSeconds > limit)
+                {
+                    float corrosionRate = (block >= 2) ? 0.02f : 0.05f;
+                    if (block >= 4) corrosionRate = 0f; // Valve Immunity (No lockouts during burn)
+                    
+                    float excess = cumulativeBurnSeconds - limit;
+                    float risk = Mathf.Clamp01(excess * corrosionRate) * KEDSettings.globalRiskMultiplier;
+                    
+                    if (UnityEngine.Random.value < risk) SetFailureState(false, 3); // Corrosive Leak / Valve Lockout
+                }
+            }
         }
 
         private void SetFailureState(bool silent, int mode)
@@ -454,9 +489,20 @@ namespace KerbalEngineDynamics
                 // Catalyst Choke — soft flameout, allowRestart stays TRUE; isFailed cleared on shutdown
                 foreach (var e in engines) e.Shutdown();
             }
-            else
+            else if (currentArchetype == EngineArchetype.Thermodynamic)
             {
                 // Thermodynamic Hard Lockout (Pump Seizure or Ignition Failure)
+                foreach (var e in engines)
+                {
+                    e.Shutdown();
+                    e.allowRestart = false;
+                    e.Events["Activate"].active = false;
+                    e.Actions["OnAction"].active = false;
+                }
+            }
+            else if (currentArchetype == EngineArchetype.Hypergolic)
+            {
+                // Hypergolic Hard Lockout (Valve Lockout or Corrosive Leak)
                 foreach (var e in engines)
                 {
                     e.Shutdown();
@@ -546,6 +592,7 @@ namespace KerbalEngineDynamics
                 else cost = (lvl >= 2) ? 1 : 2; // Gimbal
             }
             else if (currentArchetype == EngineArchetype.Monopropellant) cost = (lvl >= 4) ? 1 : (lvl >= 2) ? 2 : 3; // Flush
+            else if (currentArchetype == EngineArchetype.Hypergolic) cost = (lvl >= 4) ? 2 : (lvl >= 2) ? 3 : 5; // Decon
             else if (currentArchetype == EngineArchetype.Solid) cost = (lvl >= 4) ? 2 : (lvl >= 2) ? 4 : 6; // Patch
             
             if (diagnosticsRun) cost = Mathf.Max(1, cost - 1);
@@ -565,7 +612,7 @@ namespace KerbalEngineDynamics
             Events["PerformEVAAction"].active = false;
             
             if (currentArchetype == EngineArchetype.Thermodynamic) ignitionFatigue = 0f; // Overhaul resets fatigue
-            if (currentArchetype == EngineArchetype.Monopropellant) cumulativeBurnSeconds = 0f; // Catalyst flush
+            if (currentArchetype == EngineArchetype.Monopropellant || currentArchetype == EngineArchetype.Hypergolic) cumulativeBurnSeconds = 0f; // Reset wear
         }
 
         [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Diagnostic Inspection", unfocusedRange = 3f)]
@@ -608,6 +655,14 @@ namespace KerbalEngineDynamics
         {
             int block = blockLevelAtLaunch >= 0 ? blockLevelAtLaunch : GetGlobalCertTier();
             float limit = monoServiceLimitBase * ((block >= 6) ? 3.0f : (block >= 2) ? 1.5f : 1.0f) * KEDSettings.monoServiceLimitMultiplier;
+            return Mathf.Clamp01(1f - (cumulativeBurnSeconds / limit)) * 100f;
+        }
+
+        private float GetChemicalIntegrityPct()
+        {
+            int block = blockLevelAtLaunch >= 0 ? blockLevelAtLaunch : GetGlobalCertTier();
+            if (block >= 6) return 100f;
+            float limit = monoServiceLimitBase * ((block >= 2) ? 1.5f : 1.0f);
             return Mathf.Clamp01(1f - (cumulativeBurnSeconds / limit)) * 100f;
         }
 
@@ -705,6 +760,8 @@ namespace KerbalEngineDynamics
                 uiArchetypeStatus = $"Casing Pressure: {GetSRBPressureStatus()}";
             else if (currentArchetype == EngineArchetype.Monopropellant)
                 uiArchetypeStatus = $"Catalyst Health: {GetCatalystHealthPct():F0}%";
+            else if (currentArchetype == EngineArchetype.Hypergolic)
+                uiArchetypeStatus = $"Chemical Integrity: {GetChemicalIntegrityPct():F0}%";
             else
                 uiArchetypeStatus = $"Ignition Fatigue: {(ignitionFatigue * 100):F1}%";
 
@@ -721,6 +778,7 @@ namespace KerbalEngineDynamics
 
             if (currentArchetype == EngineArchetype.Thermodynamic) Events["PerformEVAAction"].guiName = $"Perform Systems Overhaul ({kitCost} Kits)";
             else if (currentArchetype == EngineArchetype.Monopropellant) Events["PerformEVAAction"].guiName = $"Perform Catalyst Flush ({kitCost} Kits)";
+            else if (currentArchetype == EngineArchetype.Hypergolic) Events["PerformEVAAction"].guiName = $"Perform Line Flush/Decon ({kitCost} Kits)";
             else Events["PerformEVAAction"].guiName = $"Apply Structural Patch ({kitCost} Kits)";
 
             Events["RunDiagnostics"].active = HighLogic.LoadedSceneIsFlight;
@@ -728,7 +786,7 @@ namespace KerbalEngineDynamics
             Events["HardwareRetrofit"].active = HighLogic.LoadedSceneIsFlight && blockLevelAtLaunch < GetGlobalCertTier();
         }
 
-        private string GetFailureName(int m) => m == 1 ? "Gimbal Lock" : m == 2 ? "Ignition Failure" : currentArchetype == EngineArchetype.Monopropellant ? "Catalyst Choke" : "Pump Seizure";
+        private string GetFailureName(int m) => m == 1 ? "Gimbal Lock" : m == 2 ? "Ignition Failure" : currentArchetype == EngineArchetype.Monopropellant ? "Catalyst Choke" : currentArchetype == EngineArchetype.Hypergolic ? "Valve Lockout" : "Pump Seizure";
         
         public string GetModuleTitle() => "Engine Dynamics (KED)";
         

@@ -122,6 +122,12 @@ Each propulsion type uses a unique set of triggers to simulate its specific phys
 * **Fixed-Point Checks**: Logic checks occur only at five specific fuel-percentage markers: **20%, 40%, 50%, 60%, and 80%**.  
 * **The Pressure Peak**: The highest probability roll is reserved for the **50% fuel marker**, simulating maximum internal casing pressure.
 
+#### **4\. Hypergolic Logic (Chemical Corrosion)**
+
+* **Ignition Immunity**: 0% failure risk during ignition (Contact Ignition).
+* **The Corrosion Phase**: Unlike pulse-based wear, Hypergolic engines suffer from **Chemical Corrosion** during sustained burns.
+* **Hard Lockout**: Failures represent corrosive leaks or hard valve seizures, resulting in a **Hard Lockout** requiring EVA decontamination.
+
 ---
 
 ### **C. Failure Mode Outcomes**
@@ -134,6 +140,7 @@ If a logic check fails, the system executes one of the following mechanical stat
 | **Pump Seizure** | Thermodynamic | Mid-burn flameout; engine enters a **Hard Lockout** requiring EVA repair. |
 | **Gimbal Lock** | Thermodynamic | Actuators freeze; engine provides thrust but zero vectoring (Immune at Block IV). |
 | **Catalyst Choke** | Monoprop | Non-destructive flameout; frequency increases exponentially until a **Catalyst Flush**. |
+| **Valve Lockout** | Hypergolic | Corrosive leak or hard valve failure; results in a **Hard Lockout**. |
 | **Casing Breach** | SRB | Visual explosion; thrust zeroed; part removed via non-collateral cleanup. |
 
 ---
@@ -231,6 +238,30 @@ To reflect the difference in skill while respecting KSP's strict EVA inventory v
 
 ---
 
+## **4\. Hypergolic — "The Volatile"**
+
+**Goal:** To provide near-perfect ignition reliability for critical maneuvers while introducing a high-stakes "Chemical Corrosion" mechanic.
+
+### **A. Ignition Perfection**
+
+Hypergolic engines utilize contact ignition, making them the most reliable starters in the agency’s arsenal.
+
+* **0% Ignition Risk:** Every ignition event is guaranteed to succeed, regardless of block level or previous fatigue.
+
+### **B. Chemical Corrosion (Sustained Burn Stress)**
+
+While they excel at starting, Hypergolic engines "eat themselves" during operation.
+
+* **Burn-Based Degradation:** Stress is calculated solely based on active burn time.
+* **The Valve Lockout:** Failures result in a **Hard Lockout**. This represents a corrosive leak that has compromised the pressure plumbing or a valve that has seized shut due to propellant toxicity.
+
+### **C. Maintenance: Line Flush / Decontamination**
+
+Because of the toxicity of Aerozine50 and NTO, maintenance is a high-risk, resource-intensive task.
+
+* **Decontamination:** Requires a full line flush and component replacement.
+* **Logistical Debt:** Hypergolic engines have a higher base Repair Kit cost for rookie engineers compared to Monopropellant systems.
+
 ---
 
 # **The Certification Pathway**
@@ -296,17 +327,17 @@ This updated **7-Block Certification Pathway** ensures that every mastery tier p
 
 ### **Mastery Impact Summary Table**
 
-| Block | Thermodynamic Focus | SRB Safety Focus | Monoprop Catalyst Focus |
-| :---- | :---- | :---- | :---- |
-| **X-0** | Baseline Prototype | Standard Volatility | Standard Catalyst |
-| **I** | Risk Normalization | \+5s Grace Period | \-20% Pulse Wear |
-| **II** | \-30% Running Risk (Flameout risk \-30%) | \-25% Peak Risk | \+50% Service Limit |
-| **III** | 2% Ignition Cap | Guaranteed Safe Abort | \-60% Pulse Wear |
-| **IV** | Gimbal Lock Immunity | \+15s Grace Period | Slower Failure Decay |
-| **V** | \+5% Thrust Bonus | Improved Response | \+5% Thrust Bonus |
-| **VI** | 0% Ignition Failure | 95% Breach Reduction | \+200% Service Limit |
+| Block | Thermodynamic Focus | SRB Safety Focus | Monoprop Catalyst Focus | Hypergolic Focus |
+| :---- | :---- | :---- | :---- | :---- |
+| **X-0** | Baseline Prototype | Standard Volatility | Standard Catalyst | Standard Corrosion |
+| **I** | Risk Normalization | \+5s Grace Period | \-20% Pulse Wear | Baseline Stability |
+| **II** | \-30% Running Risk | \-25% Peak Risk | \+50% Service Limit | **Reduced Corrosion Rate** |
+| **III** | 2% Ignition Cap | Guaranteed Safe Abort | \-60% Pulse Wear | Human-Rated Valves |
+| **IV** | Gimbal Lock Immunity | \+15s Grace Period | **Cycle Immunity** | **Valve Immunity** |
+| **V** | \+5% Thrust Bonus | Improved Response | \+5% Thrust Bonus | \+5% Thrust Bonus |
+| **VI** | 0% Ignition Failure | 95% Breach Reduction | \+200% Service Limit | **Infinite Integrity** |
 
-* 
+*
 
 ---
 
@@ -344,6 +375,7 @@ This table defines the resource requirements for the **Flight Test Engineer (FTE
 | **Thermodynamic** | **Flameout / Seizure** (Systems Overhaul\*) | 4 Kits | 2 Kits | 1 Kit |
 | **Thermodynamic** | **Gimbal Lock** (Actuator Reset) | 2 Kits | 1 Kit | 1 Kit |
 | **Monopropellant** | **Catalyst Choking** (Catalyst Flush\*\*) | 3 Kits | 2 Kits | 1 Kit |
+| **Hypergolic** | **Valve Lockout** (Line Flush/Decon) | 5 Kits | 3 Kits | 2 Kits |
 | **SRB** | **Casing Breach** (Structural Patch\*\*\*) | 6 Kits | 4 Kits | 2 Kits |
 | **All Engines** | **Hardware Retrofit** (Version Update) | **8 Kits** | 5 Kits | 3 Kits |
 
@@ -521,4 +553,3 @@ By identifying hardware by its **fuel lines**, the mod simulates distinct physic
 ---
 
 **Summary Quote:** "KED 2.0 ensures that as your agency grows, your older space stations and satellites become tangible artifacts of your early engineering history until a maintenance crew arrives to upgrade them".
-
