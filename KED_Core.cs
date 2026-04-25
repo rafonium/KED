@@ -85,15 +85,21 @@ namespace KerbalEngineDynamics
                     float cost = Mathf.Max(pps.partInfo.cost, 10f);
                     float thrust = Mathf.Max(e.maxThrust, 0.1f);
                     float isp = Mathf.Max(e.atmosphereCurve.Evaluate(0f), 2f);
-                    float pi = Mathf.Log10(cost) / Mathf.Log10(Mathf.Pow(thrust, 0.8f) * Mathf.Log10(isp));
-                    int ctuT = (pi > 2.0f) ? 50 : (pi >= 1.5f) ? 400 : (pi >= 1.3f) ? 1000 : 5000;
+                    float pi = Mathf.Log10(cost) / (Mathf.Log10(Mathf.Pow(thrust, 0.8f)) * Mathf.Log10(isp));
+                    // SRBs use a reduced Industrial target (2000 instead of 5000) because they are
+                    // single-use and almost never inspected mid-flight.
+                    bool isSRB = ap.partPrefab.FindModuleImplementing<ModuleEngines>()?.engineType == EngineType.SolidBooster;
+                    int ctuT = (pi > 2.0f) ? 50 : (pi >= 1.5f) ? 400 : (pi >= 1.3f) ? 1000 : (isSRB ? 2000 : 5000);
                     int baseYield = (ctuT == 50) ? 10 : (ctuT == 400) ? 40 : (ctuT == 1000) ? 50 : 100;
                     baseYield = Mathf.RoundToInt(baseYield * KEDSettings.ctuYieldMultiplier);
 
-                    // PROVENANCE BONUS: Awarded at 15s burn if not already recorded in flight
+                    // PROVENANCE BONUS: Awarded at 15s burn if not already recorded in flight.
+                    // SRBs get their full baseYield on Provenance because they are single-use and
+                    // are almost never inspected mid-flight — Provenance Check is their primary
+                    // CTU earning path.
                     if (!provChecked && burnSec >= 15f)
                     {
-                        int provYield = Mathf.Max(1, baseYield / 5);
+                        int provYield = isSRB ? baseYield : Mathf.Max(1, baseYield / 5);
                         AddCTU(pps.partInfo.name, provYield);
                     }
 
@@ -116,8 +122,9 @@ namespace KerbalEngineDynamics
                             if (bp?.partPrefab == null) continue;
                             ModuleEngines be = bp.partPrefab.FindModuleImplementing<ModuleEngines>();
                             if (be == null) continue;
-                            float bpi = Mathf.Log10(Mathf.Max(bp.cost, 10f)) / Mathf.Log10(Mathf.Pow(Mathf.Max(be.maxThrust, 0.1f), 0.8f) * Mathf.Log10(Mathf.Max(be.atmosphereCurve.Evaluate(0f), 2f)));
-                            int bCtuT = (bpi > 2.0f) ? 50 : (bpi >= 1.5f) ? 400 : (bpi >= 1.3f) ? 1000 : 5000;
+                            float bpi = Mathf.Log10(Mathf.Max(bp.cost, 10f)) / (Mathf.Log10(Mathf.Pow(Mathf.Max(be.maxThrust, 0.1f), 0.8f)) * Mathf.Log10(Mathf.Max(be.atmosphereCurve.Evaluate(0f), 2f)));
+                            bool bIsSRB = be.engineType == EngineType.SolidBooster;
+                            int bCtuT = (bpi > 2.0f) ? 50 : (bpi >= 1.5f) ? 400 : (bpi >= 1.3f) ? 1000 : (bIsSRB ? 2000 : 5000);
                             if (bCtuT == ctuT) AddCTU(kvp.Key, scrapBonus);
                         }
                         ScreenMessages.PostScreenMessage($"[KED] SCRAP BULLETIN: Fleet safety data distributed (+{scrapBonus} CTU to pedigree track)", 8f, ScreenMessageStyle.LOWER_CENTER);
@@ -168,7 +175,8 @@ namespace KerbalEngineDynamics
         [KSPField(isPersistant = true)] public string serialNumber = "";
         
         [KSPField(isPersistant = true)] public bool isFailed = false;
-        [KSPField(isPersistant = true)] public int failureType = 0; // 1=Gimbal, 2=Ignition, 3=Flameout/Choke/Seizure
+        [KSPField(isPersistant = true)] public bool gimbalFailed = false;
+        [KSPField(isPersistant = true)] public int failureType = 0; // 2=Ignition, 3=Flameout/Choke/Seizure
         [KSPField(isPersistant = true)] public bool wasBurning = false; 
         [KSPField(isPersistant = true)] public bool gimbalBuffApplied = false;
 
@@ -225,7 +233,7 @@ namespace KerbalEngineDynamics
                 if (blockLevelAtLaunch == -1)
                 {
                     blockLevelAtLaunch = GetGlobalCertTier();
-                    string pedClass = GetPedigreeClass(out float pi, out int ctuT);
+                    string pedClass = GetPedigreeClass(out float upi, out int ctuT);
                     string pedCode = pedClass.Substring(0, 2).ToUpper();
                     float secondsPerYear = GameSettings.KERBIN_TIME ? (21600f * 426f) : (86400f * 365f);
                     int year = Mathf.FloorToInt((float)Planetarium.GetUniversalTime() / secondsPerYear) + 2026;
@@ -237,6 +245,7 @@ namespace KerbalEngineDynamics
             }
 
             if (isFailed) SetFailureState(true, failureType);
+            if (gimbalFailed) SetFailureState(true, 1);
             RefreshLiveUI();
         }
 
@@ -296,6 +305,17 @@ namespace KerbalEngineDynamics
                 }
             }
 
+            if (gimbalFailed)
+            {
+                var g = part.FindModuleImplementing<ModuleGimbal>();
+                if (g != null)
+                {
+                    g.gimbalLock = true;
+                    g.Events["LockGimbal"].active = false;
+                    g.Events["FreeGimbal"].active = false;
+                }
+            }
+
             if (isFailed)
             {
                 // Hard Lockout for Thermodynamic (Pump Seizure or Ignition Failure)
@@ -327,12 +347,14 @@ namespace KerbalEngineDynamics
                 checkTimer += Time.fixedDeltaTime;
 
                 // PROVENANCE CHECK (15s Burn Reward)
+                // SRBs get their full baseYield on Provenance (their primary CTU path since
+                // they are single-use and almost never get a mid-flight diagnostic inspection).
                 if (!provenanceChecked && cumulativeBurnSeconds >= 15f)
                 {
                     provenanceChecked = true;
-                    GetPedigreeClass(out float pi, out int ctuT);
+                    GetPedigreeClass(out float upi, out int ctuT);
                     int baseYield = (ctuT == 50) ? 10 : (ctuT == 400) ? 40 : (ctuT == 1000) ? 50 : 100;
-                    int provYield = Mathf.Max(1, baseYield / 5);
+                    int provYield = (currentArchetype == EngineArchetype.Solid) ? baseYield : Mathf.Max(1, baseYield / 5);
                     KEDEvents.OnFlightRecorded.Fire(part.partInfo.name, provYield);
                     ScreenMessages.PostScreenMessage($"[KED] PROVENANCE RECORDED: +{provYield} CTU (Flight Integrity Validated)", 5f, ScreenMessageStyle.LOWER_CENTER);
                 }
@@ -462,6 +484,21 @@ namespace KerbalEngineDynamics
 
         private void SetFailureState(bool silent, int mode)
         {
+            if (mode == 1)
+            {
+                gimbalFailed = true;
+                var g = part.FindModuleImplementing<ModuleGimbal>();
+                if (g != null)
+                {
+                    g.gimbalLock = true;
+                    g.Events["LockGimbal"].active = false;
+                    g.Events["FreeGimbal"].active = false;
+                }
+                if (!silent) ScreenMessages.PostScreenMessage($"[!] Gimbal Lock: {uiSerialNumber}", 10f, ScreenMessageStyle.UPPER_CENTER);
+                Events["RepairGimbal"].active = HighLogic.LoadedSceneIsFlight;
+                return;
+            }
+
             isFailed = true;
             failureType = mode;
             
@@ -478,42 +515,26 @@ namespace KerbalEngineDynamics
                 return;
             }
 
-            if (mode == 1)
-            {
-                // Gimbal Lock — engine keeps burning, no vectoring
-                var g = part.FindModuleImplementing<ModuleGimbal>();
-                if (g != null && blockLevelAtLaunch < 4) g.gimbalLock = true;
-            }
-            else if (currentArchetype == EngineArchetype.Monopropellant)
+            if (currentArchetype == EngineArchetype.Monopropellant)
             {
                 // Catalyst Choke — soft flameout, allowRestart stays TRUE; isFailed cleared on shutdown
                 foreach (var e in engines) e.Shutdown();
             }
-            else if (currentArchetype == EngineArchetype.Thermodynamic)
+            else if (currentArchetype == EngineArchetype.Thermodynamic || currentArchetype == EngineArchetype.Hypergolic)
             {
-                // Thermodynamic Hard Lockout (Pump Seizure or Ignition Failure)
+                // Hard Lockout
                 foreach (var e in engines)
                 {
                     e.Shutdown();
                     e.allowRestart = false;
-                    e.Events["Activate"].active = false;
-                    e.Actions["OnAction"].active = false;
-                }
-            }
-            else if (currentArchetype == EngineArchetype.Hypergolic)
-            {
-                // Hypergolic Hard Lockout (Valve Lockout or Corrosive Leak)
-                foreach (var e in engines)
-                {
-                    e.Shutdown();
-                    e.allowRestart = false;
+                    e.Events["Activate"].active = true; // Wait, why was this false? specification says hard lockout.
+                    // Actually, let's keep the existing logic but just fix the gimbal part.
                     e.Events["Activate"].active = false;
                     e.Actions["OnAction"].active = false;
                 }
             }
 
-            // Show repair button only for hard failures, not soft Catalyst Choke
-            Events["PerformEVAAction"].active = !(mode == 3 && currentArchetype == EngineArchetype.Monopropellant);
+            Events["RepairEngine"].active = !(mode == 3 && currentArchetype == EngineArchetype.Monopropellant);
             Events["RunDiagnostics"].active = HighLogic.LoadedSceneIsFlight;
             if (!silent) ScreenMessages.PostScreenMessage($"[!] {GetFailureName(mode)}: {uiSerialNumber}", 10f, ScreenMessageStyle.UPPER_CENTER);
         }
@@ -562,8 +583,8 @@ namespace KerbalEngineDynamics
             else ScreenMessages.PostScreenMessage($"Requires {kitsNeeded} EVA Repair Kits.", 5f, ScreenMessageStyle.UPPER_CENTER);
         }
 
-        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Perform Maintenance", unfocusedRange = 3f)]
-        public void PerformEVAAction()
+        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Repair Engine Systems", unfocusedRange = 3f, active = false)]
+        public void RepairEngine()
         {
             Vessel v = FlightGlobals.ActiveVessel;
             if (v == null || !v.isEVA) return;
@@ -577,8 +598,47 @@ namespace KerbalEngineDynamics
             if (inv != null && inv.TotalAmountOfPartStored("evaRepairKit") >= kitsNeeded) 
             {
                 inv.RemoveNPartsFromInventory("evaRepairKit", kitsNeeded);
-                ExecuteRepair();
-                ScreenMessages.PostScreenMessage("Maintenance Complete!", 5f, ScreenMessageStyle.UPPER_CENTER);
+                isFailed = false; failureType = 0; wasBurning = false; diagnosticsRun = false;
+                foreach (var e in engines)
+                {
+                    e.allowRestart = true; 
+                    e.Events["Activate"].active = true; 
+                    e.Actions["OnAction"].active = true;
+                }
+                if (currentArchetype == EngineArchetype.Thermodynamic) ignitionFatigue = 0f;
+                if (currentArchetype == EngineArchetype.Monopropellant || currentArchetype == EngineArchetype.Hypergolic) cumulativeBurnSeconds = 0f;
+                
+                Events["RepairEngine"].active = false;
+                ScreenMessages.PostScreenMessage("Engine Systems Repaired!", 5f, ScreenMessageStyle.UPPER_CENTER);
+            }
+            else ScreenMessages.PostScreenMessage($"Requires {kitsNeeded} EVA Repair Kits.", 5f, ScreenMessageStyle.UPPER_CENTER);
+        }
+
+        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Repair Gimbal", unfocusedRange = 3f, active = false)]
+        public void RepairGimbal()
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null || !v.isEVA) return;
+            var crew = v.GetVesselCrew()[0];
+            if (crew.experienceTrait.Title != "Engineer") { ScreenMessages.PostScreenMessage("Only Engineers can repair the gimbal."); return; }
+
+            int lvl = crew.experienceLevel;
+            int kitsNeeded = GetKitCost(1, lvl);
+
+            var inv = v.rootPart.FindModuleImplementing<ModuleInventoryPart>();
+            if (inv != null && inv.TotalAmountOfPartStored("evaRepairKit") >= kitsNeeded) 
+            {
+                inv.RemoveNPartsFromInventory("evaRepairKit", kitsNeeded);
+                gimbalFailed = false;
+                var g = part.FindModuleImplementing<ModuleGimbal>();
+                if (g != null)
+                {
+                    g.gimbalLock = false;
+                    g.Events["LockGimbal"].active = true;
+                    g.Events["FreeGimbal"].active = true;
+                }
+                Events["RepairGimbal"].active = false;
+                ScreenMessages.PostScreenMessage("Gimbal Repaired!", 5f, ScreenMessageStyle.UPPER_CENTER);
             }
             else ScreenMessages.PostScreenMessage($"Requires {kitsNeeded} EVA Repair Kits.", 5f, ScreenMessageStyle.UPPER_CENTER);
         }
@@ -599,21 +659,6 @@ namespace KerbalEngineDynamics
             return cost;
         }
 
-        private void ExecuteRepair()
-        {
-            isFailed = false; failureType = 0; wasBurning = false; diagnosticsRun = false;
-            var g = part.FindModuleImplementing<ModuleGimbal>(); if (g != null) g.gimbalLock = false;
-            foreach (var e in engines)
-            {
-                e.allowRestart = true; 
-                e.Events["Activate"].active = true; 
-                e.Actions["OnAction"].active = true;
-            }
-            Events["PerformEVAAction"].active = false;
-            
-            if (currentArchetype == EngineArchetype.Thermodynamic) ignitionFatigue = 0f; // Overhaul resets fatigue
-            if (currentArchetype == EngineArchetype.Monopropellant || currentArchetype == EngineArchetype.Hypergolic) cumulativeBurnSeconds = 0f; // Reset wear
-        }
 
         [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Diagnostic Inspection", unfocusedRange = 3f)]
         public void HarvestTelemetry()
@@ -625,7 +670,7 @@ namespace KerbalEngineDynamics
 
             if (cumulativeBurnSeconds >= 60f || isFailed)
             {
-                GetPedigreeClass(out float pi, out int ctuT);
+                GetPedigreeClass(out float upi, out int ctuT);
                 int yield = (ctuT == 50) ? 10 : (ctuT == 400) ? 40 : (ctuT == 1000) ? 50 : 100;
                 yield = Mathf.RoundToInt(yield * KEDSettings.ctuYieldMultiplier);
                 
@@ -678,36 +723,57 @@ namespace KerbalEngineDynamics
         private string GetBlockName(int b) => b == 0 ? "X-0" : b == 1 ? "I" : b == 2 ? "II" : b == 3 ? "III" : b == 4 ? "IV" : b == 5 ? "V" : "VI";
         private string GetBlockSubtitle(int b) => b == 0 ? "Experimental" : b == 1 ? "Flight Qualified" : b == 2 ? "Field Certified" : b == 3 ? "Human-Rated" : b == 4 ? "Heritage" : b == 5 ? "Up-Rated" : "Masterwork";
 
-        private string GetPedigreeClass(out float pi, out int ctuTarget)
+        // ==========================================
+        // UNIVERSAL PEDIGREE INDEX (UPI 2.0)
+        // Formula: log10(SpecificCost) + log10(Isp_VAC) + GimbalBonus
+        // Additive scaling ensures exotic/nuclear engines are not penalised
+        // for their high Isp. Self-initialising so it is safe to call from
+        // GetInfo() / GetPrimaryField() before OnStart() has run.
+        // ==========================================
+        private string GetPedigreeClass(out float upi, out int ctuTarget)
         {
-            float cost = 10f;
-            if (part != null && part.partInfo != null)
-                cost = Mathf.Max(part.partInfo.cost, 10f);
+            // 1. Resolve cost and mass (safe even before OnStart)
+            //    part.mass is the live Part field; partPrefab.mass is the fallback for catalog calls.
+            float cost = (part?.partInfo != null) ? Mathf.Max(part.partInfo.cost, 10f) : 10f;
+            float rawMass = (part != null) ? part.mass
+                          : (part?.partInfo?.partPrefab != null) ? part.partInfo.partPrefab.mass
+                          : 1f;
+            float mass = Mathf.Max(rawMass, 0.001f);
+            float specificCost = Mathf.Max(cost / mass, 10f);
 
-            ModuleEngines e = engines.Count > 0 ? engines[0] : null;
-            if (e == null && part != null)
-                e = part.FindModuleImplementing<ModuleEngines>();
+            // 2. Resolve engine module — prefer cached list, fall back to live search
+            ModuleEngines e = (engines != null && engines.Count > 0)
+                ? engines[0]
+                : part?.FindModuleImplementing<ModuleEngines>();
 
-            float thrust = 0.1f;
-            if (originalMaxThrusts.Count > 0) thrust = originalMaxThrusts[0];
-            thrust = Mathf.Max(thrust, 0.1f);
+            // 3. Resolve Isp (vacuum)
+            float isp = (e?.atmosphereCurve != null)
+                ? Mathf.Max(e.atmosphereCurve.Evaluate(0f), 2f)
+                : 2f;
 
-            float isp = 2f;
-            if (engines.Count > 0 && engines[0].atmosphereCurve != null)
-                isp = Mathf.Max(engines[0].atmosphereCurve.Evaluate(0f), 2f);
-            
-            pi = Mathf.Log10(cost) / Mathf.Log10(Mathf.Pow(thrust, 0.8f) * Mathf.Log10(isp));
+            // 4. Gimbal bonus: +0.15 for engines with thrust vectoring
+            float gimbalBonus = (part != null && part.FindModuleImplementing<ModuleGimbal>() != null)
+                ? 0.15f
+                : 0f;
 
-            if (pi > 2.0f) { ctuTarget = 50; return "Exotic"; }
-            if (pi >= 1.5f) { ctuTarget = 400; return "Advanced"; }
-            if (pi >= 1.3f) { ctuTarget = 1000; return "Aerospace"; }
-            ctuTarget = 5000; return "Industrial";
+            // 5. Compute UPI 2.0
+            upi = Mathf.Log10(specificCost) + Mathf.Log10(isp) + gimbalBonus;
+
+            // 6. Classify based on UPI thresholds
+            if (upi >= 8.5f) { ctuTarget = 50;   return "Exotic"; }
+            if (upi >= 7.0f) { ctuTarget = 400;  return "Advanced"; }
+            if (upi >= 5.0f) { ctuTarget = 1000; return "Aerospace"; }
+
+            // Determine SRB status locally — safe before DetermineArchetype runs
+            bool srbClass = (e != null && e.engineType == EngineType.SolidBooster);
+            ctuTarget = srbClass ? 2000 : 5000;
+            return "Industrial";
         }
 
         private int GetGlobalCertTier()
         {
             int ctu = EngineMasteryTracker.GetCTU(part.partInfo?.name ?? "");
-            GetPedigreeClass(out float pi, out int target);
+            GetPedigreeClass(out float upi, out int target);
             
             float[] thresholds = { 0f, 0.10f, 0.25f, 0.45f, 0.65f, 0.85f, 1.0f };
             for (int i = 6; i >= 0; i--) if (ctu >= (target * thresholds[i])) return i;
@@ -743,7 +809,7 @@ namespace KerbalEngineDynamics
             uiBuildVersion = (displayBlock < GetGlobalCertTier()) ? "Legacy Hardware" : "Agency Standard";
 
             int ctu = EngineMasteryTracker.GetCTU(part.partInfo.name);
-            GetPedigreeClass(out float pi, out int target);
+            GetPedigreeClass(out float upi, out int target);
             uiDataHarvest = ctu >= target ? "MAX MASTERY" : $"{ctu} / {target} CTU";
 
             // Ignition Reliability %
@@ -765,7 +831,14 @@ namespace KerbalEngineDynamics
             else
                 uiArchetypeStatus = $"Ignition Fatigue: {(ignitionFatigue * 100):F1}%";
 
-            if (isFailed) uiArchetypeStatus = $"FAILED: {GetFailureName(failureType)}";
+            if (isFailed || gimbalFailed)
+            {
+                string status = "FAILED: ";
+                if (isFailed) status += GetFailureName(failureType);
+                if (isFailed && gimbalFailed) status += " & ";
+                if (gimbalFailed) status += "Gimbal Lock";
+                uiArchetypeStatus = status;
+            }
 
             // Dynamic button labels with kit cost hint
             int lvlHint = 2; // Default to Veteran cost
@@ -774,15 +847,21 @@ namespace KerbalEngineDynamics
                 var crew = FlightGlobals.ActiveVessel.GetVesselCrew()[0];
                 if (crew.experienceTrait.Title == "Engineer") lvlHint = crew.experienceLevel;
             }
-            int kitCost = GetKitCost(failureType > 0 ? failureType : 3, lvlHint);
 
-            if (currentArchetype == EngineArchetype.Thermodynamic) Events["PerformEVAAction"].guiName = $"Perform Systems Overhaul ({kitCost} Kits)";
-            else if (currentArchetype == EngineArchetype.Monopropellant) Events["PerformEVAAction"].guiName = $"Perform Catalyst Flush ({kitCost} Kits)";
-            else if (currentArchetype == EngineArchetype.Hypergolic) Events["PerformEVAAction"].guiName = $"Perform Line Flush/Decon ({kitCost} Kits)";
-            else Events["PerformEVAAction"].guiName = $"Apply Structural Patch ({kitCost} Kits)";
+            int gKitCost = GetKitCost(1, lvlHint);
+            int eKitCost = GetKitCost(failureType > 0 ? failureType : 3, lvlHint);
+
+            Events["RepairGimbal"].guiName = $"Repair Gimbal ({gKitCost} Kits)";
+            Events["RepairGimbal"].active = HighLogic.LoadedSceneIsFlight && gimbalFailed;
+
+            Events["RepairEngine"].active = HighLogic.LoadedSceneIsFlight && isFailed && !(failureType == 3 && currentArchetype == EngineArchetype.Monopropellant);
+            if (currentArchetype == EngineArchetype.Thermodynamic) Events["RepairEngine"].guiName = $"Perform Systems Overhaul ({eKitCost} Kits)";
+            else if (currentArchetype == EngineArchetype.Monopropellant) Events["RepairEngine"].guiName = $"Perform Catalyst Flush ({eKitCost} Kits)";
+            else if (currentArchetype == EngineArchetype.Hypergolic) Events["RepairEngine"].guiName = $"Perform Line Flush/Decon ({eKitCost} Kits)";
+            else Events["RepairEngine"].guiName = $"Apply Structural Patch ({eKitCost} Kits)";
 
             Events["RunDiagnostics"].active = HighLogic.LoadedSceneIsFlight;
-            Events["HarvestTelemetry"].active = HighLogic.LoadedSceneIsFlight && !telemetryHarvested && (cumulativeBurnSeconds >= 60f || isFailed);
+            Events["HarvestTelemetry"].active = HighLogic.LoadedSceneIsFlight && !telemetryHarvested && (cumulativeBurnSeconds >= 60f || isFailed || gimbalFailed);
             Events["HardwareRetrofit"].active = HighLogic.LoadedSceneIsFlight && blockLevelAtLaunch < GetGlobalCertTier();
         }
 
@@ -793,7 +872,7 @@ namespace KerbalEngineDynamics
         public string GetPrimaryField()
         {
             if (part != null && part.partInfo != null)
-                return $"Pedigree: {GetPedigreeClass(out float pi, out int c)} ({pi:F2} PI)";
+                return $"Pedigree: {GetPedigreeClass(out float upi, out int c)} ({upi:F2} UPI)";
             return "Pedigree: Evaluated on Placement";
         }
 
@@ -802,7 +881,7 @@ namespace KerbalEngineDynamics
         public override string GetInfo()
         {
             if (part != null && part.partInfo != null)
-                return $"<color=#00e6e6><b>=== FACTORY SPECIFICATION ===</b></color>\n<b>Class: <color=#ffaa00>{GetPedigreeClass(out float p, out int c)}</color></b>\n<i>Place in workspace for Live Telemetry.</i>";
+                return $"<color=#00e6e6><b>=== FACTORY SPECIFICATION ===</b></color>\n<b>Class: <color=#ffaa00>{GetPedigreeClass(out float upi, out int c)}</color></b>\n<i>Place in workspace for Live Telemetry.</i>";
             return $"<color=#00e6e6><b>=== FACTORY SPECIFICATION ===</b></color>\n<b>Class: <color=#ffaa00>Evaluated on Placement</color></b>\n<i>Place in workspace for Live Telemetry.</i>";
         }
     }

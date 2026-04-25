@@ -8,19 +8,21 @@ This section defines the core technical architecture of **Kerbal Engine Dynamics
 
 **Goal:** To establish an objective, performance-based standard for engine "prestige" that scales with financial density, ensuring high-tech hardware is distinguished from mass-produced parts.
 
-### **The Pedigree Index (PI) Formula**
+### **The Universal Pedigree Index (UPI 2.0) Formula**
 
-The calculation uses a log-log relationship to isolate the financial density of a part relative to its performance envelope.
+The calculation uses additive logarithmic scaling to analyze the **Value-Density** and **Technological Efficiency** of a part. This ensures exotic engines are not penalized for high efficiency.
 
-$$PI \= \\frac{\\log\_{10}(Cost)}{\\log\_{10}(Thrust\_{Vac}^{0.8} \\times \\log\_{10}(I\_{sp\\\_VAC}))}$$
+$$UPI = \log_{10}(\text{Specific Cost}) + \log_{10}(I_{sp\_VAC}) + G$$
 
 ### **Safety Clamps & Integrity**
 
 To ensure compatibility with diverse mod-lists (e.g., *Realism Overhaul*), the implementation uses hard-coded floors to prevent calculation errors:
 
 * **Cost Floor:** Mathf.Max(part.cost, 10f).  
-* **Thrust Floor:** Mathf.Max(engine.maxThrust, 0.1f).  
+* **Mass Floor:** Mathf.Max(part.mass, 0.001f).
+* **Specific Cost Floor:** Mathf.Max(cost/mass, 10f).
 * **Isp Floor:** Mathf.Max(engine.atmosphereCurve.Evaluate(0f), 2f).
+* **Gimbal Factor (G):** +0.15 flat bonus if a Gimbal module is present.
 
 ---
 
@@ -39,12 +41,12 @@ Calculation is restricted to specific events to minimize CPU overhead:
 
 The "Junk" tier has been removed to ensure all hardware feels like professional aerospace equipment, with **Industrial** serving as the entry-level track.
 
-| Class | PI Range | CTU Target | Discovery Rate | Yield (EVA) |
+| Class | UPI 2.0 Range | CTU Target | Discovery Rate | Yield (EVA) |
 | :---- | :---- | :---- | :---- | :---- |
-| **Exotic** | $\> 2.0$ | 50 | 20% | \+10 CTU |
-| **Advanced** | $1.5 \- 2.0$ | 400 | 10% | \+40 CTU |
-| **Aerospace** | $1.3 \- 1.5$ | 1,000 | 5% | \+50 CTU |
-| **Industrial** | $\< 1.3$ | 5,000 | 2% | \+100 CTU |
+| **Exotic** | $\> 8.5$ | 50 | 20% | \+10 CTU |
+| **Advanced** | $7.0 \- 8.49$ | 400 | 10% | \+40 CTU |
+| **Aerospace** | $5.0 \- 6.99$ | 1,000 | 5% | \+50 CTU |
+| **Industrial** | $\< 5.0$ | 5,000 (2,000 for SRB) | 2% | \+100 CTU |
 
 ---
 
@@ -353,7 +355,7 @@ To maintain the distinction between "Exotic" and "Industrial" hardware, CTU requ
 | **III** | **45%** | 23 | 180 | 450 | 2,250 |
 | **IV** | **65%** | 33 | 260 | 650 | 3,250 |
 | **V** | **85%** | 43 | 340 | 850 | 4,250 |
-| **VI** | **100%** | 50 | 400 | 1,000 | 5,000 |
+| **VI** | **100%** | 50 | 400 | 1,000 | 5,000 (2,000 SRB) |
 
 ---
 
@@ -414,7 +416,7 @@ These actions do not consume Repair Kits but require a Kerbal Engineer to be on 
 
 **Goal:** To incentivize the safe return of hardware to Kerbin, turning "trash" into organizational knowledge.
 
-* **Provenance Check:** An engine only contributes to agency knowledge if it has "proven" itself with at least **15s of active burn time**.  
+* **Provenance Check:** An engine only contributes to agency knowledge if it has "proven" itself with at least **15s of active burn time**. For liquid engines, this grants a minor validation bonus (`baseYield / 5`). For **SRBs**, this grants the **Full Base Yield**, as they are single-use and rarely survive for manual inspection.
 * **The Auto-Harvest:** Any engine recovered after a **60s burn** that was *not* inspected in flight will automatically yield its "Deep Inspection" CTU upon recovery.  
 * **Scrap Bonus:** Recovering a failed part (e.g., a breached SRB casing) grants a **Global CTU bonus** to every engine within that same Pedigree track, simulating a fleet-wide safety bulletin.
 
@@ -431,7 +433,7 @@ This section defines the interactive and visual framework for **Kerbal Engine Dy
 **Goal:** To establish the engine’s "financial density" at a glance without cluttering the part selection menu.
 
 * **Header:** \<color=\#00e6e6\>\<b\>KED FACTORY SPECIFICATION\</b\>\</color\>  
-* **Design Pedigree:** Displays the Class (Industrial, Aerospace, Advanced, or Exotic) calculated via the Dynamic PI logic.  
+* **Design Pedigree:** Displays the Class (Industrial, Aerospace, Advanced, or Exotic) calculated via the UPI 2.0 logic.  
 * **Mastery Status:** **\[HIDDEN\]** (Mastery is an agency-wide secret until the part is actively workspace-tested).  
 * **UX Note:** \> *“Note: Place this part in the workspace and Right-Click to view live Certification levels, S/N data, and Telemetry reports.”*
 
@@ -518,7 +520,7 @@ Does this layout solve the mechanical gap for liquid engines while keeping the i
 The primary goal is to force players to make meaningful choices based on **Financial Density** rather than just performance stats.
 
 * **Pedigree Balance:** Players must choose between **Industrial** hardware, which requires a massive "long grind" to master, and **Exotic** masterpieces that offer near-instant reliability at a much higher cost.  
-* **Objective Standards:** The **Pedigree Index (PI)** ensures that high-tech hardware is mathematically distinguished from mass-produced parts, removing arbitrary tiering.
+* **Objective Standards:** The **Universal Pedigree Index (UPI 2.0)** ensures that high-tech hardware is mathematically distinguished from mass-produced parts, removing arbitrary tiering.
 
 ### **2\. Reliability Earned Through Heritage**
 
