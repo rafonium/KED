@@ -14,6 +14,34 @@ namespace KerbalEngineDynamics
     }
 
     // ==========================================
+    // GLOBAL MOD SETTINGS
+    // ==========================================
+    public static class KEDSettings
+    {
+        public static float globalRiskMultiplier = 1.0f;
+        public static float srbGracePeriodMultiplier = 1.0f;
+        public static float monoServiceLimitMultiplier = 1.0f;
+        public static float ctuYieldMultiplier = 1.0f;
+        
+        private static bool initialized = false;
+
+        public static void EnsureInitialized()
+        {
+            if (initialized) return;
+            ConfigNode[] nodes = GameDatabase.Instance?.GetConfigNodes("KED_SETTINGS");
+            if (nodes != null && nodes.Length > 0)
+            {
+                ConfigNode node = nodes[0];
+                node.TryGetValue("globalRiskMultiplier", ref globalRiskMultiplier);
+                node.TryGetValue("srbGracePeriodMultiplier", ref srbGracePeriodMultiplier);
+                node.TryGetValue("monoServiceLimitMultiplier", ref monoServiceLimitMultiplier);
+                node.TryGetValue("ctuYieldMultiplier", ref ctuYieldMultiplier);
+            }
+            initialized = true;
+        }
+    }
+
+    // ==========================================
     // THE CUMULATIVE TEST UNIT (CTU) TRACKER
     // ==========================================
     [KSPScenario(ScenarioCreationOptions.AddToAllGames, GameScenes.FLIGHT, GameScenes.EDITOR, GameScenes.SPACECENTER)]
@@ -25,6 +53,7 @@ namespace KerbalEngineDynamics
         public override void OnAwake() 
         { 
             Instance = this;
+            KEDSettings.EnsureInitialized();
             KEDEvents.OnFlightRecorded.Add(OnEngineMessageReceived);
             GameEvents.onVesselRecovered.Add(OnVesselRecovered);
         }
@@ -57,6 +86,7 @@ namespace KerbalEngineDynamics
                     float pi = Mathf.Log10(cost) / Mathf.Log10(Mathf.Pow(thrust, 0.8f) * Mathf.Log10(isp));
                     int ctuT = (pi > 2.0f) ? 50 : (pi >= 1.5f) ? 400 : (pi >= 1.3f) ? 1000 : 5000;
                     int baseYield = (ctuT == 50) ? 10 : (ctuT == 400) ? 40 : (ctuT == 1000) ? 50 : 100;
+                    baseYield = Mathf.RoundToInt(baseYield * KEDSettings.ctuYieldMultiplier);
                     // Auto-harvest: only if NOT already inspected in-flight AND >= 60s burn
                     if (!harvested && burnSec >= 60f)
                     {
@@ -168,6 +198,7 @@ namespace KerbalEngineDynamics
 
         public override void OnStart(StartState state)
         {
+            KEDSettings.EnsureInitialized();
             engine = part.FindModuleImplementing<ModuleEngines>();
             if (engine != null)
             {
@@ -273,7 +304,7 @@ namespace KerbalEngineDynamics
                 float fatiguePenalty = isHot ? 0.01f : 0.02f;
                 ignitionFatigue += fatiguePenalty;
 
-                float baseRisk = GetBaseIgnitionRisk(block);
+                float baseRisk = GetBaseIgnitionRisk(block) * KEDSettings.globalRiskMultiplier;
                 // Block X-0: hard cap 20%; Block III+: hard cap 2%
                 float cap = (block == 0) ? 0.20f : (block >= 3) ? 0.02f : 1.0f;
                 float finalRisk = Mathf.Clamp(baseRisk + ignitionFatigue, 0f, cap);
@@ -295,7 +326,7 @@ namespace KerbalEngineDynamics
             // SRB Fixed-Point Checks
             if (currentArchetype == EngineArchetype.Solid)
             {
-                float grace = (block >= 4) ? 25f : (block >= 1) ? 15f : 10f;
+                float grace = ((block >= 4) ? 25f : (block >= 1) ? 15f : 10f) * KEDSettings.srbGracePeriodMultiplier;
                 if (cumulativeBurnSeconds < grace) return;
 
                 float fuelPct = (float)(engine.propellants[0].totalResourceAvailable / engine.propellants[0].totalResourceCapacity);
@@ -308,6 +339,7 @@ namespace KerbalEngineDynamics
                     if (!isPeak) risk *= 0.5f;               // Non-peak checks are half
                     if (isPeak && block >= 2) risk *= 0.75f; // Block II: -25% Bell Curve peak risk
                     if (block == 0) risk *= 2.0f;            // Block X-0: 2x multiplier
+                    risk *= KEDSettings.globalRiskMultiplier;
 
                     if (UnityEngine.Random.value < risk) { SetFailureState(false, 3); return; } // Casing Breach
                     srbStagePassed++;
@@ -318,7 +350,7 @@ namespace KerbalEngineDynamics
             {
                 checkTimer = 0f;
                 nextCheckInterval = UnityEngine.Random.Range(10f, 15f);
-                float risk = 0.02f + ignitionFatigue;
+                float risk = (0.02f + ignitionFatigue) * KEDSettings.globalRiskMultiplier;
                 if (block == 0) risk *= 2.0f;
                 if (block >= 2) risk *= 0.7f; // -30% running risk
                 // TWR stress modifier: up to +50% additional risk at 5G
@@ -335,13 +367,13 @@ namespace KerbalEngineDynamics
             else if (currentArchetype == EngineArchetype.Monopropellant && checkTimer >= 5f)
             {
                 checkTimer = 0f;
-                float limit = monoServiceLimitBase * ((block >= 6) ? 3.0f : (block >= 2) ? 1.5f : 1.0f);
+                float limit = monoServiceLimitBase * ((block >= 6) ? 3.0f : (block >= 2) ? 1.5f : 1.0f) * KEDSettings.monoServiceLimitMultiplier;
 
                 if (cumulativeBurnSeconds > limit)
                 {
                     float decayRate = (block >= 4) ? 0.05f : 0.10f;
                     float excess = cumulativeBurnSeconds - limit;
-                    float risk = Mathf.Clamp01(excess * decayRate);
+                    float risk = Mathf.Clamp01(excess * decayRate) * KEDSettings.globalRiskMultiplier;
                     if (UnityEngine.Random.value < risk) SetFailureState(false, 3); // Catalyst Choke (soft)
                 }
             }
@@ -490,6 +522,7 @@ namespace KerbalEngineDynamics
             {
                 GetPedigreeClass(out float pi, out int ctuT);
                 int yield = (ctuT == 50) ? 10 : (ctuT == 400) ? 40 : (ctuT == 1000) ? 50 : 100;
+                yield = Mathf.RoundToInt(yield * KEDSettings.ctuYieldMultiplier);
                 
                 if (isFailed) yield *= 2;
                 if (cumulativeBurnSeconds >= 180f) yield = Mathf.RoundToInt(yield * 1.5f);
@@ -508,7 +541,7 @@ namespace KerbalEngineDynamics
         {
             int block = blockLevelAtLaunch >= 0 ? blockLevelAtLaunch : GetGlobalCertTier();
             if (block == 6) return 100f;
-            float baseRisk = GetBaseIgnitionRisk(block);
+            float baseRisk = GetBaseIgnitionRisk(block) * KEDSettings.globalRiskMultiplier;
             float cap = (block == 0) ? 0.20f : (block >= 3) ? 0.02f : 1.0f;
             return (1f - Mathf.Clamp(baseRisk + ignitionFatigue, 0f, cap)) * 100f;
         }
@@ -516,7 +549,7 @@ namespace KerbalEngineDynamics
         private float GetCatalystHealthPct()
         {
             int block = blockLevelAtLaunch >= 0 ? blockLevelAtLaunch : GetGlobalCertTier();
-            float limit = monoServiceLimitBase * ((block >= 6) ? 3.0f : (block >= 2) ? 1.5f : 1.0f);
+            float limit = monoServiceLimitBase * ((block >= 6) ? 3.0f : (block >= 2) ? 1.5f : 1.0f) * KEDSettings.monoServiceLimitMultiplier;
             return Mathf.Clamp01(1f - (cumulativeBurnSeconds / limit)) * 100f;
         }
 
