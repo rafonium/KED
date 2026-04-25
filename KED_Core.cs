@@ -10,7 +10,7 @@ namespace KerbalEngineDynamics
     // ==========================================
     public static class KEDEvents
     {
-        public static EventData<string> OnFlightRecorded = new EventData<string>("KED_OnFlightRecorded");
+        public static EventData<string, int> OnFlightRecorded = new EventData<string, int>("KED_OnFlightRecorded");
     }
 
     // ==========================================
@@ -60,7 +60,7 @@ namespace KerbalEngineDynamics
 
         private void OnDestroy() 
         { 
-            KEDEvents.OnFlightRecorded.Remove(OnEngineMessageReceived); 
+            KEDEvents.OnFlightRecorded.Remove(OnEngineMessageReceived);
             GameEvents.onVesselRecovered.Remove(OnVesselRecovered);
         }
 
@@ -71,10 +71,12 @@ namespace KerbalEngineDynamics
                 foreach (ProtoPartModuleSnapshot ppms in pps.modules)
                 {
                     if (ppms.moduleName != "KEDModule") continue;
-                    float burnSec = 0f; bool failed = false; bool harvested = false;
+                    float burnSec = 0f; bool failed = false; bool harvested = false; bool provChecked = false;
                     ppms.moduleValues.TryGetValue("cumulativeBurnSeconds", ref burnSec);
                     ppms.moduleValues.TryGetValue("isFailed", ref failed);
                     ppms.moduleValues.TryGetValue("telemetryHarvested", ref harvested);
+                    ppms.moduleValues.TryGetValue("provenanceChecked", ref provChecked);
+
                     if (burnSec < 15f) continue;
                     AvailablePart ap = PartLoader.getPartInfoByName(pps.partInfo.name);
                     if (ap?.partPrefab == null) continue;
@@ -87,7 +89,15 @@ namespace KerbalEngineDynamics
                     int ctuT = (pi > 2.0f) ? 50 : (pi >= 1.5f) ? 400 : (pi >= 1.3f) ? 1000 : 5000;
                     int baseYield = (ctuT == 50) ? 10 : (ctuT == 400) ? 40 : (ctuT == 1000) ? 50 : 100;
                     baseYield = Mathf.RoundToInt(baseYield * KEDSettings.ctuYieldMultiplier);
-                    // Auto-harvest: only if NOT already inspected in-flight AND >= 60s burn
+
+                    // PROVENANCE BONUS: Awarded at 15s burn if not already recorded in flight
+                    if (!provChecked && burnSec >= 15f)
+                    {
+                        int provYield = Mathf.Max(1, baseYield / 5);
+                        AddCTU(pps.partInfo.name, provYield);
+                    }
+
+                    // AUTO-HARVEST: only if NOT already inspected in-flight AND >= 60s burn
                     if (!harvested && burnSec >= 60f)
                     {
                         int yield = baseYield;
@@ -116,11 +126,10 @@ namespace KerbalEngineDynamics
             }
         }
 
-        private void OnEngineMessageReceived(string engineName)
+        private void OnEngineMessageReceived(string engineName, int amount)
         {
-            // Simplified standard increment, actual dynamic harvesting handled in module
-            if (engineExperience.ContainsKey(engineName)) engineExperience[engineName]++;
-            else engineExperience.Add(engineName, 1);
+            // Standard increment using the provided amount
+            AddCTU(engineName, amount);
         }
 
         public void AddCTU(string engineName, int amount)
@@ -171,6 +180,7 @@ namespace KerbalEngineDynamics
         [KSPField(isPersistant = true)] public bool telemetryHarvested = false;
         [KSPField(isPersistant = true)] public float nextCheckInterval = 10f; // Randomized 10–15s for thermodynamic running checks
         [KSPField(isPersistant = true)] public bool diagnosticsRun = false;
+        [KSPField(isPersistant = true)] public bool provenanceChecked = false;
 
         // UI Fields
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "S/N", groupName = "KED", groupDisplayName = "RELIABILITY REPORT")]
@@ -188,10 +198,10 @@ namespace KerbalEngineDynamics
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Archetype Status", groupName = "KED")]
         public string uiArchetypeStatus = "";
 
-        private ModuleEngines engine;
+        private List<ModuleEngines> engines = new List<ModuleEngines>();
         private float checkTimer = 0f;
         private float uiUpdateTimer = 0f;
-        private float originalMaxThrust = -1f;
+        private List<float> originalMaxThrusts = new List<float>();
 
         public enum EngineArchetype { Thermodynamic, Monopropellant, Solid }
         private EngineArchetype currentArchetype;
@@ -199,10 +209,13 @@ namespace KerbalEngineDynamics
         public override void OnStart(StartState state)
         {
             KEDSettings.EnsureInitialized();
-            engine = part.FindModuleImplementing<ModuleEngines>();
-            if (engine != null)
+            engines = part.FindModulesImplementing<ModuleEngines>();
+            if (engines.Count > 0)
             {
-                if (originalMaxThrust < 0) originalMaxThrust = engine.maxThrust;
+                foreach (var e in engines)
+                {
+                    originalMaxThrusts.Add(e.maxThrust);
+                }
                 DetermineArchetype();
             }
 
@@ -228,14 +241,17 @@ namespace KerbalEngineDynamics
 
         private void DetermineArchetype()
         {
-            if (engine.engineType == EngineType.SolidBooster) currentArchetype = EngineArchetype.Solid;
-            else if (engine.propellants.Count == 1 && engine.propellants[0].name == "MonoPropellant") currentArchetype = EngineArchetype.Monopropellant;
+            if (engines.Count == 0) return;
+            // We use the first module to determine archetype for the whole part
+            var e = engines[0];
+            if (e.engineType == EngineType.SolidBooster) currentArchetype = EngineArchetype.Solid;
+            else if (e.propellants.Count == 1 && e.propellants[0].name == "MonoPropellant") currentArchetype = EngineArchetype.Monopropellant;
             else currentArchetype = EngineArchetype.Thermodynamic;
         }
 
         public void Update()
         {
-            if (!HighLogic.LoadedSceneIsFlight || engine == null) return;
+            if (!HighLogic.LoadedSceneIsFlight || engines.Count == 0) return;
 
             uiUpdateTimer += Time.deltaTime;
             if (uiUpdateTimer > 1f) { uiUpdateTimer = 0f; RefreshLiveUI(); }
@@ -243,12 +259,20 @@ namespace KerbalEngineDynamics
 
         public void FixedUpdate()
         {
-            if (!HighLogic.LoadedSceneIsFlight || engine == null) return;
+            if (!HighLogic.LoadedSceneIsFlight || engines.Count == 0) return;
 
-            bool isCurrentlyBurning = engine.EngineIgnited && engine.currentThrottle > 0.001f && !engine.flameout;
+            bool anyEngineBurning = false;
+            foreach (var e in engines)
+            {
+                if (e.EngineIgnited && e.currentThrottle > 0.001f && !e.flameout)
+                {
+                    anyEngineBurning = true;
+                    break;
+                }
+            }
 
             // SHUTDOWN TRANSITION
-            if (!isCurrentlyBurning && wasBurning)
+            if (!anyEngineBurning && wasBurning)
             {
                 wasBurning = false;
                 lastShutdownUT = Planetarium.GetUniversalTime();
@@ -262,24 +286,45 @@ namespace KerbalEngineDynamics
 
             if (isFailed)
             {
-                // Hard Lockout only for Thermodynamic type-3; Monoprop Catalyst Choke is soft
-                if (failureType == 3 && currentArchetype != EngineArchetype.Monopropellant)
-                { engine.Shutdown(); engine.allowRestart = false; engine.Events["Activate"].active = false; }
+                // Hard Lockout for Thermodynamic (Pump Seizure or Ignition Failure)
+                if (currentArchetype == EngineArchetype.Thermodynamic && (failureType == 3 || failureType == 2))
+                { 
+                    foreach (var e in engines)
+                    {
+                        if (e.EngineIgnited) e.Shutdown(); 
+                        e.allowRestart = false; 
+                        e.Events["Activate"].active = false; 
+                        e.Actions["OnAction"].active = false; // Disable Action Groups
+                        e.requestedThrottle = 0f;
+                    }
+                }
                 return;
             }
 
             // IGNITION TRANSITION
-            if (isCurrentlyBurning && !wasBurning)
+            if (anyEngineBurning && !wasBurning)
             {
                 wasBurning = true;
                 HandleIgnitionEvent();
             }
 
             // CONTINUOUS BURN ACCUMULATOR
-            if (isCurrentlyBurning)
+            if (anyEngineBurning)
             {
                 cumulativeBurnSeconds += Time.fixedDeltaTime;
                 checkTimer += Time.fixedDeltaTime;
+
+                // PROVENANCE CHECK (15s Burn Reward)
+                if (!provenanceChecked && cumulativeBurnSeconds >= 15f)
+                {
+                    provenanceChecked = true;
+                    GetPedigreeClass(out float pi, out int ctuT);
+                    int baseYield = (ctuT == 50) ? 10 : (ctuT == 400) ? 40 : (ctuT == 1000) ? 50 : 100;
+                    int provYield = Mathf.Max(1, baseYield / 5);
+                    KEDEvents.OnFlightRecorded.Fire(part.partInfo.name, provYield);
+                    ScreenMessages.PostScreenMessage($"[KED] PROVENANCE RECORDED: +{provYield} CTU (Flight Integrity Validated)", 5f, ScreenMessageStyle.LOWER_CENTER);
+                }
+
                 HandleRunningEvent();
             }
         }
@@ -329,7 +374,8 @@ namespace KerbalEngineDynamics
                 float grace = ((block >= 4) ? 25f : (block >= 1) ? 15f : 10f) * KEDSettings.srbGracePeriodMultiplier;
                 if (cumulativeBurnSeconds < grace) return;
 
-                float fuelPct = (float)(engine.propellants[0].totalResourceAvailable / engine.propellants[0].totalResourceCapacity);
+                if (engines[0]?.propellants == null || engines[0].propellants.Count == 0) return;
+                float fuelPct = (float)(engines[0].propellants[0].totalResourceAvailable / engines[0].propellants[0].totalResourceCapacity);
                 float[] stages = { 0.8f, 0.6f, 0.5f, 0.4f, 0.2f };
 
                 if (srbStagePassed < stages.Length && fuelPct <= stages[srbStagePassed])
@@ -387,8 +433,11 @@ namespace KerbalEngineDynamics
             if (currentArchetype == EngineArchetype.Solid && mode == 3)
             {
                 if (!silent) ScreenMessages.PostScreenMessage($"[FATAL] CASING BREACH DETECTED - ABORT IMMEDIATELY", 10f, ScreenMessageStyle.UPPER_CENTER);
-                engine.Shutdown();
-                engine.maxThrust = 0;
+                foreach (var e in engines)
+                {
+                    e.Shutdown();
+                    e.maxThrust = 0;
+                }
                 if (blockLevelAtLaunch < 3) part.explode(); // Collateral if below Block III
                 else part.Die(); // Safe, non-collateral cleanup
                 return;
@@ -403,14 +452,18 @@ namespace KerbalEngineDynamics
             else if (currentArchetype == EngineArchetype.Monopropellant)
             {
                 // Catalyst Choke — soft flameout, allowRestart stays TRUE; isFailed cleared on shutdown
-                engine.Shutdown();
+                foreach (var e in engines) e.Shutdown();
             }
             else
             {
                 // Thermodynamic Hard Lockout (Pump Seizure or Ignition Failure)
-                engine.Shutdown();
-                engine.allowRestart = false;
-                engine.Events["Activate"].active = false;
+                foreach (var e in engines)
+                {
+                    e.Shutdown();
+                    e.allowRestart = false;
+                    e.Events["Activate"].active = false;
+                    e.Actions["OnAction"].active = false;
+                }
             }
 
             // Show repair button only for hard failures, not soft Catalyst Choke
@@ -503,7 +556,12 @@ namespace KerbalEngineDynamics
         {
             isFailed = false; failureType = 0; wasBurning = false; diagnosticsRun = false;
             var g = part.FindModuleImplementing<ModuleGimbal>(); if (g != null) g.gimbalLock = false;
-            engine.allowRestart = true; engine.Events["Activate"].active = true; 
+            foreach (var e in engines)
+            {
+                e.allowRestart = true; 
+                e.Events["Activate"].active = true; 
+                e.Actions["OnAction"].active = true;
+            }
             Events["PerformEVAAction"].active = false;
             
             if (currentArchetype == EngineArchetype.Thermodynamic) ignitionFatigue = 0f; // Overhaul resets fatigue
@@ -555,8 +613,8 @@ namespace KerbalEngineDynamics
 
         private string GetSRBPressureStatus()
         {
-            if (engine?.propellants == null || engine.propellants.Count == 0) return "Stable";
-            float fuelPct = (float)(engine.propellants[0].totalResourceAvailable / engine.propellants[0].totalResourceCapacity);
+            if (engines.Count == 0 || engines[0]?.propellants == null || engines[0].propellants.Count == 0) return "Stable";
+            float fuelPct = (float)(engines[0].propellants[0].totalResourceAvailable / engines[0].propellants[0].totalResourceCapacity);
             if (fuelPct > 0.65f || fuelPct < 0.35f) return "Stable";
             if (fuelPct > 0.55f || fuelPct < 0.45f) return "Nominal";
             return "PEAK RISK";
@@ -567,9 +625,21 @@ namespace KerbalEngineDynamics
 
         private string GetPedigreeClass(out float pi, out int ctuTarget)
         {
-            float cost = Mathf.Max(part.partInfo.cost, 10f);
-            float thrust = Mathf.Max(originalMaxThrust > 0 ? originalMaxThrust : 0.1f, 0.1f);
-            float isp = Mathf.Max(engine.atmosphereCurve.Evaluate(0f), 2f);
+            float cost = 10f;
+            if (part != null && part.partInfo != null)
+                cost = Mathf.Max(part.partInfo.cost, 10f);
+
+            ModuleEngines e = engines.Count > 0 ? engines[0] : null;
+            if (e == null && part != null)
+                e = part.FindModuleImplementing<ModuleEngines>();
+
+            float thrust = 0.1f;
+            if (originalMaxThrusts.Count > 0) thrust = originalMaxThrusts[0];
+            thrust = Mathf.Max(thrust, 0.1f);
+
+            float isp = 2f;
+            if (engines.Count > 0 && engines[0].atmosphereCurve != null)
+                isp = Mathf.Max(engines[0].atmosphereCurve.Evaluate(0f), 2f);
             
             pi = Mathf.Log10(cost) / Mathf.Log10(Mathf.Pow(thrust, 0.8f) * Mathf.Log10(isp));
 
@@ -591,8 +661,11 @@ namespace KerbalEngineDynamics
 
         private void ApplyBlockPhysics(int block)
         {
-            if (engine != null && originalMaxThrust > 0)
-                engine.maxThrust = (block >= 5) ? originalMaxThrust * 1.05f : originalMaxThrust;
+            for (int i = 0; i < engines.Count; i++)
+            {
+                if (originalMaxThrusts.Count > i)
+                    engines[i].maxThrust = (block >= 5) ? originalMaxThrusts[i] * 1.05f : originalMaxThrusts[i];
+            }
 
             if (currentArchetype == EngineArchetype.Solid && block >= 5 && !gimbalBuffApplied)
             {
@@ -658,8 +731,21 @@ namespace KerbalEngineDynamics
         private string GetFailureName(int m) => m == 1 ? "Gimbal Lock" : m == 2 ? "Ignition Failure" : currentArchetype == EngineArchetype.Monopropellant ? "Catalyst Choke" : "Pump Seizure";
         
         public string GetModuleTitle() => "Engine Dynamics (KED)";
-        public string GetPrimaryField() => $"Pedigree: {GetPedigreeClass(out float pi, out int c)} ({pi:F2} PI)";
+        
+        public string GetPrimaryField()
+        {
+            if (part != null && part.partInfo != null)
+                return $"Pedigree: {GetPedigreeClass(out float pi, out int c)} ({pi:F2} PI)";
+            return "Pedigree: Evaluated on Placement";
+        }
+
         public Callback<Rect> GetDrawModulePanelCallback() => null;
-        public override string GetInfo() => $"<color=#00e6e6><b>=== FACTORY SPECIFICATION ===</b></color>\n<b>Class: <color=#ffaa00>{GetPedigreeClass(out float p, out int c)}</color></b>\n<i>Place in workspace for Live Telemetry.</i>";
+
+        public override string GetInfo()
+        {
+            if (part != null && part.partInfo != null)
+                return $"<color=#00e6e6><b>=== FACTORY SPECIFICATION ===</b></color>\n<b>Class: <color=#ffaa00>{GetPedigreeClass(out float p, out int c)}</color></b>\n<i>Place in workspace for Live Telemetry.</i>";
+            return $"<color=#00e6e6><b>=== FACTORY SPECIFICATION ===</b></color>\n<b>Class: <color=#ffaa00>Evaluated on Placement</color></b>\n<i>Place in workspace for Live Telemetry.</i>";
+        }
     }
 }
