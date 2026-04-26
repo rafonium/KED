@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "c:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\KED.csproj": {}
+    "C:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\KED.csproj": {}
   },
   "projects": {
-    "c:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\KED.csproj": {
+    "C:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\KED.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "c:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\KED.csproj",
+        "projectUniqueName": "C:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\KED.csproj",
         "projectName": "KED",
-        "projectPath": "c:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\KED.csproj",
+        "projectPath": "C:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\KED.csproj",
         "packagesPath": "C:\\Users\\rafif\\.nuget\\packages\\",
-        "outputPath": "c:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\obj\\",
+        "outputPath": "C:\\Users\\rafif\\OneDrive\\Documents\\code-base\\ksp-mod\\KED\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\rafif\\AppData\\Roaming\\NuGet\\NuGet.Config"

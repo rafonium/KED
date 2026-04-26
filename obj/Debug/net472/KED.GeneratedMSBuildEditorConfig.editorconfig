@@ -1,6 +1,6 @@
 is_global = true
 build_property.RootNamespace = KED
-build_property.ProjectDir = c:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\
+build_property.ProjectDir = C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\
 build_property.EnableComHosting = 
 build_property.EnableGeneratedComInterfaceComImportInterop = 
 build_property.CsWinRTUseWindowsUIXamlProjections = false

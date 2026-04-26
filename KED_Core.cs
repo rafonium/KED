@@ -119,12 +119,20 @@ namespace KerbalEngineDynamics
                         {
                             if (kvp.Key == pps.partInfo.name) continue;
                             AvailablePart bp = PartLoader.getPartInfoByName(kvp.Key);
-                            if (bp?.partPrefab == null) continue;
+                            if (bp == null || bp.partPrefab == null) continue;
+
                             ModuleEngines be = bp.partPrefab.FindModuleImplementing<ModuleEngines>();
                             if (be == null) continue;
-                            float bpi = Mathf.Log10(Mathf.Max(bp.cost, 10f)) / (Mathf.Log10(Mathf.Pow(Mathf.Max(be.maxThrust, 0.1f), 0.8f)) * Mathf.Log10(Mathf.Max(be.atmosphereCurve.Evaluate(0f), 2f)));
-                            bool bIsSRB = be.engineType == EngineType.SolidBooster;
-                            int bCtuT = (bpi > 2.0f) ? 50 : (bpi >= 1.5f) ? 400 : (bpi >= 1.3f) ? 1000 : (bIsSRB ? 2000 : 5000);
+
+                            // Calculate standardized UPI 2.0 for this part prefab
+                            float bMass = bp.partPrefab.mass;
+                            float bCost = bp.cost;
+                            float bIsp = Mathf.Max(be.atmosphereCurve.Evaluate(0f), 2f);
+                            float bGimbal = (bp.partPrefab.FindModuleImplementing<ModuleGimbal>() != null) ? 0.15f : 0f;
+
+                            // Use the same classification logic as KEDModule
+                            KEDModule.CalculateUPI(bMass, bCost, bIsp, bGimbal, out float bUpi, out int bCtuT);
+
                             if (bCtuT == ctuT) AddCTU(kvp.Key, scrapBonus);
                         }
                         ScreenMessages.PostScreenMessage($"[KED] SCRAP BULLETIN: Fleet safety data distributed (+{scrapBonus} CTU to pedigree track)", 8f, ScreenMessageStyle.LOWER_CENTER);
@@ -732,42 +740,35 @@ namespace KerbalEngineDynamics
         // ==========================================
         private string GetPedigreeClass(out float upi, out int ctuTarget)
         {
-            // 1. Resolve cost and mass (safe even before OnStart)
-            //    part.mass is the live Part field; partPrefab.mass is the fallback for catalog calls.
-            float cost = (part?.partInfo != null) ? Mathf.Max(part.partInfo.cost, 10f) : 10f;
-            float rawMass = (part != null) ? part.mass
-                          : (part?.partInfo?.partPrefab != null) ? part.partInfo.partPrefab.mass
-                          : 1f;
-            float mass = Mathf.Max(rawMass, 0.001f);
-            float specificCost = Mathf.Max(cost / mass, 10f);
-
-            // 2. Resolve engine module — prefer cached list, fall back to live search
-            ModuleEngines e = (engines != null && engines.Count > 0)
-                ? engines[0]
+            // Use prefab/dry mass to ensure classification remains stable regardless of fuel state
+            float mass = (part != null && part.partInfo != null) ? part.partInfo.partPrefab.mass : 1.0f;
+            float cost = (part != null && part.partInfo != null) ? part.partInfo.cost : 100f;
+            
+            ModuleEngines e = (engines != null && engines.Count > 0) ? engines[0] 
                 : part?.FindModuleImplementing<ModuleEngines>();
 
-            // 3. Resolve Isp (vacuum)
-            float isp = (e?.atmosphereCurve != null)
-                ? Mathf.Max(e.atmosphereCurve.Evaluate(0f), 2f)
-                : 2f;
+            float isp = (e != null) ? Mathf.Max(e.atmosphereCurve.Evaluate(0f), 2f) : 2f;
+            float gimbalBonus = (part != null && part.FindModuleImplementing<ModuleGimbal>() != null) ? 0.15f : 0f;
 
-            // 4. Gimbal bonus: +0.15 for engines with thrust vectoring
-            float gimbalBonus = (part != null && part.FindModuleImplementing<ModuleGimbal>() != null)
-                ? 0.15f
-                : 0f;
+            return CalculateUPI(mass, cost, isp, gimbalBonus, out upi, out ctuTarget);
+        }
 
-            // 5. Compute UPI 2.0
-            upi = Mathf.Log10(specificCost) + Mathf.Log10(isp) + gimbalBonus;
+        public static string CalculateUPI(float mass, float cost, float isp, float gimbalBonus, out float upi, out int ctuTarget)
+        {
+            upi = 0f;
+            ctuTarget = 5000;
 
-            // 6. Classify based on UPI thresholds
+            float specificCost = cost / Mathf.Max(mass, 0.01f);
+            
+            // UPI 2.0 Formula: Log10(Specific Cost) + Log10(Vac ISP) + Gimbal Bonus
+            upi = Mathf.Log10(Mathf.Max(specificCost, 1f)) + Mathf.Log10(isp) + gimbalBonus;
+
             if (upi >= 8.5f) { ctuTarget = 50;   return "Exotic"; }
             if (upi >= 7.0f) { ctuTarget = 400;  return "Advanced"; }
             if (upi >= 5.0f) { ctuTarget = 1000; return "Aerospace"; }
+            if (upi >= 3.5f) { ctuTarget = 2000; return "Industrial"; }
 
-            // Determine SRB status locally — safe before DetermineArchetype runs
-            bool srbClass = (e != null && e.engineType == EngineType.SolidBooster);
-            ctuTarget = srbClass ? 2000 : 5000;
-            return "Industrial";
+            return "Utility";
         }
 
         private int GetGlobalCertTier()
@@ -803,66 +804,75 @@ namespace KerbalEngineDynamics
         {
             if (part == null || part.partInfo == null) return;
 
-            uiSerialNumber = serialNumber != "" ? serialNumber : "VAB-PREVIEW";
-            int displayBlock = HighLogic.LoadedSceneIsFlight ? blockLevelAtLaunch : GetGlobalCertTier();
-            uiCertLevel = $"Block {GetBlockName(displayBlock)} - {GetBlockSubtitle(displayBlock)}";
-            uiBuildVersion = (displayBlock < GetGlobalCertTier()) ? "Legacy Hardware" : "Agency Standard";
-
-            int ctu = EngineMasteryTracker.GetCTU(part.partInfo.name);
-            GetPedigreeClass(out float upi, out int target);
-            uiDataHarvest = ctu >= target ? "MAX MASTERY" : $"{ctu} / {target} CTU";
-
-            // Ignition Reliability %
-            if (currentArchetype == EngineArchetype.Thermodynamic)
-                uiIgnitionReliability = displayBlock == 6 ? "100% (Immune)" : $"{GetIgnitionReliabilityPct():F1}%";
-            else
-                uiIgnitionReliability = "N/A";
-
-            // Thrust Rating %
-            uiThrustRating = displayBlock >= 5 ? "105% (Up-Rated)" : "100% (Baseline)";
-
-            // Archetype Status
-            if (currentArchetype == EngineArchetype.Solid)
-                uiArchetypeStatus = $"Casing Pressure: {GetSRBPressureStatus()}";
-            else if (currentArchetype == EngineArchetype.Monopropellant)
-                uiArchetypeStatus = $"Catalyst Health: {GetCatalystHealthPct():F0}%";
-            else if (currentArchetype == EngineArchetype.Hypergolic)
-                uiArchetypeStatus = $"Chemical Integrity: {GetChemicalIntegrityPct():F0}%";
-            else
-                uiArchetypeStatus = $"Ignition Fatigue: {(ignitionFatigue * 100):F1}%";
-
-            if (isFailed || gimbalFailed)
+            // Update display values
+            try
             {
-                string status = "FAILED: ";
-                if (isFailed) status += GetFailureName(failureType);
-                if (isFailed && gimbalFailed) status += " & ";
-                if (gimbalFailed) status += "Gimbal Lock";
-                uiArchetypeStatus = status;
-            }
+                uiSerialNumber = serialNumber != "" ? serialNumber : "VAB-PREVIEW";
+                int displayBlock = HighLogic.LoadedSceneIsFlight ? blockLevelAtLaunch : GetGlobalCertTier();
+                uiCertLevel = $"Block {GetBlockName(displayBlock)} - {GetBlockSubtitle(displayBlock)}";
+                uiBuildVersion = (displayBlock < GetGlobalCertTier()) ? "Legacy Hardware" : "Agency Standard";
 
-            // Dynamic button labels with kit cost hint
-            int lvlHint = 2; // Default to Veteran cost
-            if (FlightGlobals.ActiveVessel != null && FlightGlobals.ActiveVessel.isEVA)
+                int ctu = EngineMasteryTracker.GetCTU(part.partInfo.name);
+                GetPedigreeClass(out float upi, out int target);
+                uiDataHarvest = ctu >= target ? "MAX MASTERY" : $"{ctu} / {target} CTU";
+
+                // Ignition Reliability %
+                if (currentArchetype == EngineArchetype.Thermodynamic)
+                    uiIgnitionReliability = displayBlock == 6 ? "100% (Immune)" : $"{GetIgnitionReliabilityPct():F1}%";
+                else
+                    uiIgnitionReliability = "N/A";
+
+                // Thrust Rating %
+                uiThrustRating = displayBlock >= 5 ? "105% (Up-Rated)" : "100% (Baseline)";
+
+                // Archetype Status
+                if (currentArchetype == EngineArchetype.Solid)
+                    uiArchetypeStatus = $"Casing Pressure: {GetSRBPressureStatus()}";
+                else if (currentArchetype == EngineArchetype.Monopropellant)
+                    uiArchetypeStatus = $"Catalyst Health: {GetCatalystHealthPct():F0}%";
+                else if (currentArchetype == EngineArchetype.Hypergolic)
+                    uiArchetypeStatus = $"Chemical Integrity: {GetChemicalIntegrityPct():F0}%";
+                else
+                    uiArchetypeStatus = $"Ignition Fatigue: {(ignitionFatigue * 100):F1}%";
+
+                if (isFailed || gimbalFailed)
+                {
+                    string status = "FAILED: ";
+                    if (isFailed) status += GetFailureName(failureType);
+                    if (isFailed && gimbalFailed) status += " & ";
+                    if (gimbalFailed) status += "Gimbal Lock";
+                    uiArchetypeStatus = status;
+                }
+
+                // Dynamic button labels with kit cost hint
+                int lvlHint = 2; // Default to Veteran cost
+                if (FlightGlobals.ActiveVessel != null && FlightGlobals.ActiveVessel.isEVA)
+                {
+                    var crew = FlightGlobals.ActiveVessel.GetVesselCrew();
+                    if (crew != null && crew.Count > 0 && crew[0].experienceTrait.Title == "Engineer") 
+                        lvlHint = crew[0].experienceLevel;
+                }
+
+                int gKitCost = GetKitCost(1, lvlHint);
+                int eKitCost = GetKitCost(failureType > 0 ? failureType : 3, lvlHint);
+
+                Events["RepairGimbal"].guiName = $"Repair Gimbal ({gKitCost} Kits)";
+                Events["RepairGimbal"].active = HighLogic.LoadedSceneIsFlight && gimbalFailed;
+
+                Events["RepairEngine"].active = HighLogic.LoadedSceneIsFlight && isFailed && !(failureType == 3 && currentArchetype == EngineArchetype.Monopropellant);
+                if (currentArchetype == EngineArchetype.Thermodynamic) Events["RepairEngine"].guiName = $"Perform Systems Overhaul ({eKitCost} Kits)";
+                else if (currentArchetype == EngineArchetype.Monopropellant) Events["RepairEngine"].guiName = $"Perform Catalyst Flush ({eKitCost} Kits)";
+                else if (currentArchetype == EngineArchetype.Hypergolic) Events["RepairEngine"].guiName = $"Perform Line Flush/Decon ({eKitCost} Kits)";
+                else Events["RepairEngine"].guiName = $"Apply Structural Patch ({eKitCost} Kits)";
+
+                Events["RunDiagnostics"].active = HighLogic.LoadedSceneIsFlight;
+                Events["HarvestTelemetry"].active = HighLogic.LoadedSceneIsFlight && !telemetryHarvested && (cumulativeBurnSeconds >= 60f || isFailed || gimbalFailed);
+                Events["HardwareRetrofit"].active = HighLogic.LoadedSceneIsFlight && blockLevelAtLaunch < GetGlobalCertTier();
+            }
+            catch (System.Exception ex)
             {
-                var crew = FlightGlobals.ActiveVessel.GetVesselCrew()[0];
-                if (crew.experienceTrait.Title == "Engineer") lvlHint = crew.experienceLevel;
+                Debug.LogError($"[KED] UI Refresh Failure: {ex.Message}");
             }
-
-            int gKitCost = GetKitCost(1, lvlHint);
-            int eKitCost = GetKitCost(failureType > 0 ? failureType : 3, lvlHint);
-
-            Events["RepairGimbal"].guiName = $"Repair Gimbal ({gKitCost} Kits)";
-            Events["RepairGimbal"].active = HighLogic.LoadedSceneIsFlight && gimbalFailed;
-
-            Events["RepairEngine"].active = HighLogic.LoadedSceneIsFlight && isFailed && !(failureType == 3 && currentArchetype == EngineArchetype.Monopropellant);
-            if (currentArchetype == EngineArchetype.Thermodynamic) Events["RepairEngine"].guiName = $"Perform Systems Overhaul ({eKitCost} Kits)";
-            else if (currentArchetype == EngineArchetype.Monopropellant) Events["RepairEngine"].guiName = $"Perform Catalyst Flush ({eKitCost} Kits)";
-            else if (currentArchetype == EngineArchetype.Hypergolic) Events["RepairEngine"].guiName = $"Perform Line Flush/Decon ({eKitCost} Kits)";
-            else Events["RepairEngine"].guiName = $"Apply Structural Patch ({eKitCost} Kits)";
-
-            Events["RunDiagnostics"].active = HighLogic.LoadedSceneIsFlight;
-            Events["HarvestTelemetry"].active = HighLogic.LoadedSceneIsFlight && !telemetryHarvested && (cumulativeBurnSeconds >= 60f || isFailed || gimbalFailed);
-            Events["HardwareRetrofit"].active = HighLogic.LoadedSceneIsFlight && blockLevelAtLaunch < GetGlobalCertTier();
         }
 
         private string GetFailureName(int m) => m == 1 ? "Gimbal Lock" : m == 2 ? "Ignition Failure" : currentArchetype == EngineArchetype.Monopropellant ? "Catalyst Choke" : currentArchetype == EngineArchetype.Hypergolic ? "Valve Lockout" : "Pump Seizure";
