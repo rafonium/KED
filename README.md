@@ -1,6 +1,6 @@
-# Kerbal Engine Dynamics (KED) 3.0
+# Kerbal Engine Dynamics (KED) 1.0
 
-**Kerbal Engine Dynamics (KED)** is a total overhaul of engine reliability for Kerbal Space Program. It moves away from simple random numbers toward a **manufacturing-first model**, where engines are defined by their production batches, operational history, and technological maturity.
+**Kerbal Engine Dynamics (KED)** is a total overhaul of engine reliability for Kerbal Space Program. It introduces a **manufacturing-first model**, where engines are defined by their production batches, operational history, and technological maturity rather than simple random numbers.
 
 > *"An engine feels nearly invincible — until it doesn't."*
 
@@ -8,7 +8,7 @@
 
 ## 🏗️ The Core Systems
 
-KED 3.0 is built on three interactive pillars that transform your engineering workflow:
+KED 1.0 is built on three interactive pillars that transform your engineering workflow:
 
 ### 1. Batch Quality System (BQS)
 Engines are no longer independent actors. When you launch a vessel, every engine of the same part name belongs to a single **Manufacturing Batch**.
@@ -17,13 +17,13 @@ Engines are no longer independent actors. When you launch a vessel, every engine
 *   **Cluster Complexity**: The chance of a "Lemon" batch increases with the number of engines in the cluster. Massive heavy lifters require redundancy to survive.
 
 ### 2. Operational Maturity System (OMS)
-The legacy CTU system is replaced by **Maturity Points (MP)**. Maturity is the global "experience level" your agency has with a specific engine archetype. 
+Progression is tracked via **Maturity Points (MP)**. Maturity is the global "experience level" your agency has with a specific engine archetype. 
 *   Earn MP through successful launches, long burns, and recovering hardware.
 *   Perform **EVA Repairs** to gain "The Hard Lesson" (+10 MP), accelerating your mastery of the hardware.
 *   Higher maturity levels unlock better "Lemon Anchors" (base reliability) and unique archetype perks.
 
 ### 3. Atmospheric Sensitivity Index (ASI)
-Reliability is now tied to environment. The ratio between an engine's Vacuum and Sea-Level ISP determines its **ASI**.
+Reliability is tied to the operating environment. The ratio between an engine's Vacuum and Sea-Level ISP determines its **ASI**.
 *   **Vacuum Engines** struggle with ignitions at high pressure (sea level).
 *   **Booster Engines** suffer increased fatigue when restarted in a vacuum.
 *   Operating outside an engine's optimal "Atmospheric Band" increases the risk of mechanical failure.
@@ -32,7 +32,7 @@ Reliability is now tied to environment. The ratio between an engine's Vacuum and
 
 ## 🔬 Engine Archetypes
 
-KED 3.0 identifies hardware through prioritized resource detection, ensuring modded engines (Near Future, Kerbal Atomics) are correctly classified.
+KED 1.0 identifies hardware through prioritized resource detection, ensuring modded engines (Near Future, Kerbal Atomics) are correctly classified.
 
 | Archetype | Identity & Key Failure Modes | Maturity Focus |
 | :--- | :--- | :--- |
@@ -45,7 +45,7 @@ KED 3.0 identifies hardware through prioritized resource detection, ensuring mod
 | **Monopropellant** | Pulse-heavy; catalyst degradation over cumulative burn time. | Catalyst Life |
 | **Bipropellant** | Standard liquid; high ignition fatigue and turbopump risk. | Combustion Mastery |
 | **Advanced** | High-performance Hydrolox/Methalox (ISP > 500). | Precise Tolerances |
-| **Thermodynamic** | Legacy fallback for standard liquid engines. | Mechanical Ruggedness |
+| **Thermodynamic** | Standard liquid engines and mechanical fallbacks. | Mechanical Ruggedness |
 
 ---
 
@@ -69,8 +69,8 @@ Engineers are no longer just repair technicians; they are vital field assets.
 *   **Manufacturing Hints**: The Factory Specification and Launchpad PAW may show subtle, non-deterministic notes like *"Slight variance detected in turbopump alignment"*—a hint that your batch might be a Lemon.
 *   **Identity & Reputation**: As an engine line matures, it gains history. The Tooltip/PAW tracks **Total Flights**, **Failures**, and **Success Rate**.
 *   **Real-time Alerts**: Screen messages (Red/Orange/Yellow) notify you of failures instantly, allowing for split-second abort decisions.
-*   **Heritage Hardware**: Vessels launched years ago remain "locked" to the maturity standards of their launch date, serving as historical artifacts until a crew arrives to retrofit them.
+*   **Heritage Hardware**: Vessels remain "locked" to the maturity standards of their launch date, serving as historical artifacts until a crew arrives to retrofit them.
 
 ---
 
-> "KED 3.0 ensures that every engine tells a story. From the first experimental prototypes that fail on the pad to the heritage workhorses that carry your agency to the stars."
+> "KED 1.0 ensures that every engine tells a story. From the first experimental prototypes that fail on the pad to the heritage workhorses that carry your agency to the stars."
