@@ -59,10 +59,7 @@ If a batch is rolled as a **Lemon**, the group is designated for potential failu
     - **5% Cases:** No Weak Unit, but **Degraded Batch** (All engines in the batch suffer soft failures/thrust drops).
 *   **Cumulative Timer:** The Weak Unit trigger window tracks **cumulative running time** across all ignitions.
 *   **SRB Spread Window:** SRBs are guaranteed safe for the first 10s. The failure window is **40% – 70% fuel**, with peak probability at 50%. This prevents "safe cheese timing" by staging exactly at the 50% mark.
-*   **Non-Explicit Sensory Cues:** Impending failures provide subtle sensory feedback instead of UI warnings:
-    - Slight thrust jitter.
-    - Micro gimbal twitch.
-    - Subtle sound distortion (pitch shifting or static).
+*   **Impulse Failures:** Failures occur suddenly without explicit pre-failure sensory cues, requiring players to react to the failure state itself. (Note: Pre-failure jitter/twitch removed).
 *   **Repair Recovery:** Successfully performing an EVA repair on a Weak Unit clears the "Lemon" flag but applies a **Hidden Penalty** (e.g., -1-2% ISP or increased future ignition fatigue). Recovery is not a "perfect reset."
 
 
@@ -397,7 +394,7 @@ The Part Action Window field `State: <Status>` sits directly below "Specific Imp
 - Replace per-engine RNG with batch-gated failure windows per archetype.
 - Implement `weakUnitFailureWindow` timer for each archetype (Cumulative).
 - **SRB Spread Window:** Implement the 40-70% failure window for Solids.
-- **Sensory Cues:** Implement thrust jitter, gimbal twitch, and audio distortion modules.
+- **Failure Impulse:** Ensure failures trigger cleanly according to the failure window without early cues.
 - **Failure Cascades:** Implement the logic for rare chain reactions between parts.
 - Implement **Screen Message Dispatcher** with queuing logic and KSP color-coding.
 - Implement PAW `State` field with dynamic "EVA Repair Req" strings.
@@ -413,7 +410,7 @@ The Part Action Window field `State: <Status>` sits directly below "Specific Imp
 
 
 ### Phase 5 — UI & UX
-- **Remove all "Silent Anomaly" early warnings** and hidden pre-lockout cues (replaced by sensory cues).
+- **Remove all "Silent Anomaly" early warnings.**
 - Implement the **Screen Message Protocol** (7s duration, top-center).
 - **Identity & Reputation:** Add historical stats (Flights/Success) to tooltips and PAW. Implement engine line renaming.
 - **ASI Feedback:** Add real-time "Outside Optimal Band" PAW warnings and staging UI efficiency zones.
@@ -430,7 +427,7 @@ The Part Action Window field `State: <Status>` sits directly below "Specific Imp
 - Seed RNG batch rolls and verify probability table output per archetype.
 - **Test Batch Lineage:** Verify that Lemon results influence future launch probabilities.
 - **Test SRB Timing:** Confirm failures occur within the 40-70% window, not just at 50%.
-- **Test Sensory Cues:** Verify jitter/twitch/audio effects trigger before failures.
+- **Test Failure Timing:** Verify failure effects trigger exactly at the designated failure time.
 - **Test Cascades:** Verify that rare chain reactions occur as intended.
 - **Test Repair Penalties:** Confirm that repaired engines suffer ISP/fatigue penalties.
 - Test Weak Unit designation, failure window timing, and repair-clearing behavior.
