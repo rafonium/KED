@@ -82,15 +82,18 @@ namespace KerbalEngineDynamics
                     if (ap?.partPrefab == null) continue;
                     ModuleEngines e = ap.partPrefab.FindModuleImplementing<ModuleEngines>();
                     if (e == null) continue;
-                    float cost = Mathf.Max(pps.partInfo.cost, 10f);
-                    float thrust = Mathf.Max(e.maxThrust, 0.1f);
-                    float isp = Mathf.Max(e.atmosphereCurve.Evaluate(0f), 2f);
-                    float pi = Mathf.Log10(cost) / (Mathf.Log10(Mathf.Pow(thrust, 0.8f)) * Mathf.Log10(isp));
-                    // SRBs use a reduced Industrial target (2000 instead of 5000) because they are
-                    // single-use and almost never inspected mid-flight.
-                    bool isSRB = ap.partPrefab.FindModuleImplementing<ModuleEngines>()?.engineType == EngineType.SolidBooster;
-                    int ctuT = (pi > 2.0f) ? 50 : (pi >= 1.5f) ? 400 : (pi >= 1.3f) ? 1000 : (isSRB ? 2000 : 5000);
+
+                    float bMass = ap.partPrefab.mass;
+                    float bCost = Mathf.Max(pps.partInfo.cost, 10f);
+                    float bIsp = Mathf.Max(e.atmosphereCurve.Evaluate(0f), 2f);
+                    float bGimbal = ap.partPrefab.FindModuleImplementing<ModuleGimbal>() != null ? 0.25f : 0f;
+
+                    // Unified Classification via UPI 2.0
+                    KEDModule.CalculateUPI(bMass, bCost, bIsp, bGimbal, out float upi, out int ctuT);
                     int baseYield = (ctuT == 50) ? 10 : (ctuT == 400) ? 40 : (ctuT == 1000) ? 50 : 100;
+                    bool isSRB = e.engineType == EngineType.SolidBooster;
+                    if (isSRB) baseYield = 100; // SRBs rely on recovery/provenance primarily
+
                     baseYield = Mathf.RoundToInt(baseYield * KEDSettings.ctuYieldMultiplier);
 
                     // PROVENANCE BONUS: Awarded at 15s burn if not already recorded in flight.
@@ -125,15 +128,15 @@ namespace KerbalEngineDynamics
                             if (be == null) continue;
 
                             // Calculate standardized UPI 2.0 for this part prefab
-                            float bMass = bp.partPrefab.mass;
-                            float bCost = bp.cost;
-                            float bIsp = Mathf.Max(be.atmosphereCurve.Evaluate(0f), 2f);
-                            float bGimbal = (bp.partPrefab.FindModuleImplementing<ModuleGimbal>() != null) ? 0.15f : 0f;
+                            float sMass = bp.partPrefab.mass;
+                            float sCost = bp.cost;
+                            float sIsp = Mathf.Max(be.atmosphereCurve.Evaluate(0f), 2f);
+                            float sGimbal = (bp.partPrefab.FindModuleImplementing<ModuleGimbal>() != null) ? 0.25f : 0f;
 
                             // Use the same classification logic as KEDModule
-                            KEDModule.CalculateUPI(bMass, bCost, bIsp, bGimbal, out float bUpi, out int bCtuT);
+                            KEDModule.CalculateUPI(sMass, sCost, sIsp, sGimbal, out float sUpi, out int sCtuT);
 
-                            if (bCtuT == ctuT) AddCTU(kvp.Key, scrapBonus);
+                            if (sCtuT == ctuT) AddCTU(kvp.Key, scrapBonus);
                         }
                         ScreenMessages.PostScreenMessage($"[KED] SCRAP BULLETIN: Fleet safety data distributed (+{scrapBonus} CTU to pedigree track)", 8f, ScreenMessageStyle.LOWER_CENTER);
                     }
@@ -229,6 +232,7 @@ namespace KerbalEngineDynamics
             engines = part.FindModulesImplementing<ModuleEngines>();
             if (engines.Count > 0)
             {
+                originalMaxThrusts.Clear(); // Duplication protection
                 foreach (var e in engines)
                 {
                     originalMaxThrusts.Add(e.maxThrust);
@@ -845,11 +849,11 @@ namespace KerbalEngineDynamics
                 }
 
                 // Dynamic button labels with kit cost hint
-                int lvlHint = 2; // Default to Veteran cost
-                if (FlightGlobals.ActiveVessel != null && FlightGlobals.ActiveVessel.isEVA)
+                int lvlHint = 2; // Default to standard cost
+                if (HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null && FlightGlobals.ActiveVessel.isEVA)
                 {
                     var crew = FlightGlobals.ActiveVessel.GetVesselCrew();
-                    if (crew != null && crew.Count > 0 && crew[0].experienceTrait.Title == "Engineer") 
+                    if (crew != null && crew.Count > 0 && crew[0]?.experienceTrait?.Title == "Engineer") 
                         lvlHint = crew[0].experienceLevel;
                 }
 
