@@ -1,0 +1,1 @@
+always ignore everything in /notes folder

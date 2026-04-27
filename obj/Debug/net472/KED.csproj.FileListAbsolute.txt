@@ -7,4 +7,3 @@ C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\bin\Debug\net472\KED.dll
 C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\bin\Debug\net472\KED.pdb
 C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.dll
 C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.pdb
-C:\Users\rafif\OneDrive\Documents\code-base\ksp-mod\KED\obj\Debug\net472\KED.sourcelink.json
