@@ -383,12 +383,16 @@ namespace KerbalEngineDynamics
         private bool lastIgnited = false;
         public bool IsFailed => HasFailure(1) || HasFailure(2) || HasFailure(3) || HasFailure(4) || HasFailure(5);
 
-        public bool HasFailure(int mode)
+        public int GetFailureCount(int mode)
         {
-            if (string.IsNullOrEmpty(activeFailuresMask) || activeFailuresMask.Length < 5) return false;
-            if (mode < 1 || mode > 5) return false;
-            return activeFailuresMask[mode - 1] == '1';
+            if (string.IsNullOrEmpty(activeFailuresMask)) activeFailuresMask = "0,0,0,0,0";
+            string[] split = activeFailuresMask.Split(',');
+            if (mode < 1 || mode > split.Length) return 0;
+            int.TryParse(split[mode - 1], out int val);
+            return val;
         }
+
+        public bool HasFailure(int mode) => GetFailureCount(mode) > 0;
 
         private int GetInvestedKits(int mode)
         {
@@ -410,13 +414,21 @@ namespace KerbalEngineDynamics
 
         private void SetFailure(int mode, bool active)
         {
-            if (string.IsNullOrEmpty(activeFailuresMask) || activeFailuresMask.Length < 5) activeFailuresMask = "00000";
+            if (string.IsNullOrEmpty(activeFailuresMask)) activeFailuresMask = "0,0,0,0,0";
+            string[] split = activeFailuresMask.Split(',');
             if (mode < 1 || mode > 5) return;
             
-            char[] mask = activeFailuresMask.ToCharArray();
-            mask[mode - 1] = active ? '1' : '0';
-            activeFailuresMask = new string(mask);
-            isFailed = activeFailuresMask.Contains("1");
+            int val = 0;
+            int.TryParse(split[mode - 1], out val);
+            
+            if (active) val++;
+            else val = Mathf.Max(0, val - 1);
+            
+            split[mode - 1] = val.ToString();
+            activeFailuresMask = string.Join(",", split);
+            
+            isFailed = false;
+            for (int i = 0; i < split.Length; i++) if (split[i] != "0") { isFailed = true; break; }
         }
 
         private static readonly HashSet<string> HypergolicPropellants = new HashSet<string> { "Aerozine50", "NTO", "MMH", "UDMH", "NitricAcid", "Hydrazine" };
@@ -770,32 +782,46 @@ namespace KerbalEngineDynamics
             if (string.IsNullOrEmpty(activeFailuresMask) || activeFailuresMask == "00000") { uiState = "Nominal"; return; }
 
             List<string> faults = new List<string>();
-            if (HasFailure(1)) faults.Add("Ignition");
-            if (HasFailure(2)) faults.Add("Flameout");
-            if (HasFailure(3)) faults.Add("Gimbal");
-            if (HasFailure(4)) faults.Add("Thrust");
-            if (HasFailure(5)) faults.Add("DESTROYED");
+            if (GetFailureCount(1) > 0) faults.Add("Ignition" + (GetFailureCount(1) > 1 ? " x" + GetFailureCount(1) : ""));
+            if (GetFailureCount(2) > 0) faults.Add("Flameout" + (GetFailureCount(2) > 1 ? " x" + GetFailureCount(2) : ""));
+            if (GetFailureCount(3) > 0) faults.Add("Gimbal" + (GetFailureCount(3) > 1 ? " x" + GetFailureCount(3) : ""));
+            if (GetFailureCount(4) > 0) faults.Add("Thrust" + (GetFailureCount(4) > 1 ? " x" + GetFailureCount(4) : ""));
+            if (GetFailureCount(5) > 0) faults.Add("DESTROYED");
 
             if (HasFailure(5)) uiState = "DESTROYED";
             else if (HasFailure(1) || HasFailure(2)) uiState = "FAULT (" + string.Join("+", faults.ToArray()) + ")";
             else uiState = "DEGRADED (" + string.Join("+", faults.ToArray()) + ")";
 
-            UpdateRepairLabel("RepairIgnition", 1, "Repair: Injectors");
-            UpdateRepairLabel("RepairFlameout", 2, "Repair: Combustion Chamber");
-            UpdateRepairLabel("RepairGimbal", 3, "Repair: Actuators");
-            UpdateRepairLabel("RepairThrust", 4, (archetype == EngineArchetype.Monopropellant || archetype == EngineArchetype.Hypergolic) ? "Valve Flush" : "Repair: Fuel Valves");
+            UpdateRepairButtons("RepairIgnition", 1, "Repair: Injectors");
+            UpdateRepairButtons("RepairFlameout", 2, "Repair: Combustion Chamber");
+            UpdateRepairButtons("RepairGimbal", 3, "Repair: Actuators");
+            UpdateRepairButtons("RepairThrust", 4, (archetype == EngineArchetype.Monopropellant || archetype == EngineArchetype.Hypergolic) ? "Valve Flush" : "Repair: Fuel Valves");
+            
             UpdateRepairLabel("PreventativeMaintenance", 0, "Preventative Maintenance");
             UpdateRepairLabel("CatalystSwap", 7, "Catalyst Swap");
             UpdateRepairLabel("NitrogenPurge", 8, "Nitrogen Purge");
 
-            Events["RepairIgnition"].active = HasFailure(1);
-            Events["RepairFlameout"].active = HasFailure(2);
-            Events["RepairGimbal"].active = HasFailure(3);
-            Events["RepairThrust"].active = HasFailure(4);
-
             Events["CatalystSwap"].active = (archetype == EngineArchetype.Monopropellant && maturityLevelAtLaunch >= 1);
             Events["NitrogenPurge"].active = (archetype == EngineArchetype.Hypergolic && maturityLevelAtLaunch >= 1);
             Events["CycleValves"].active = (archetype == EngineArchetype.Hypergolic && maturityLevelAtLaunch >= 1);
+        }
+
+        private void UpdateRepairButtons(string eventName, int mode, string baseName)
+        {
+            int count = GetFailureCount(mode);
+            if (Events.Contains(eventName))
+            {
+                Events[eventName].active = (count > 0);
+                if (count > 0)
+                {
+                    int invested = GetInvestedKits(mode);
+                    string label = baseName;
+                    if (count > 1) label += " x" + count;
+                    
+                    if (invested > 0) Events[eventName].guiName = $"{label} ({invested} kits invested)";
+                    else Events[eventName].guiName = label;
+                }
+            }
         }
 
         private void UpdateRepairLabel(string eventName, int mode, string baseName)
@@ -849,65 +875,102 @@ namespace KerbalEngineDynamics
                 return; 
             }
 
+            // 2. Hybrid / Multi-mode Advanced
+            // If an engine has both an air-breathing mode and a vacuum/bipropellant mode (e.g. RAPIER), 
+            // it is categorized as Advanced.
+            if (engines.Count > 1)
+            {
+                bool hasAir = false;
+                bool hasNonAir = false;
+                foreach (var eMod in engines)
+                {
+                    bool isAir = false;
+                    foreach (var prop in eMod.propellants)
+                        if (prop.name == "IntakeAir" || prop.name == "IntakeAtm") { isAir = true; break; }
+                    
+                    if (isAir) hasAir = true;
+                    else hasNonAir = true;
+                }
+                if (hasAir && hasNonAir) 
+                { 
+                    archetype = EngineArchetype.Advanced; 
+                    return; 
+                }
+            }
+
+            // 3. Airbreathing (Intake resources)
+            // Priority over Exotic/Advanced because Jets have high ISP (3000+) in KSP
+            foreach (var eMod in engines)
+            {
+                foreach (var prop in eMod.propellants)
+                {
+                    if (prop.name == "IntakeAir" || prop.name == "IntakeAtm") 
+                    { 
+                        archetype = EngineArchetype.Airbreathing; 
+                        return; 
+                    }
+                }
+            }
+
+            // 4. Electric (Standard electric types or Noble gases)
+            // Priority over Exotic because Ion engines have high ISP (4200)
+            foreach (var eMod in engines)
+            {
+                bool isElec = eMod.engineType == EngineType.Electric;
+                if (!isElec)
+                {
+                    bool hasEC = false;
+                    bool hasNoble = false;
+                    foreach (var prop in eMod.propellants)
+                    {
+                        if (prop.name == "ElectricCharge") hasEC = true;
+                        if (ElectricPropellants.Contains(prop.name)) hasNoble = true;
+                    }
+                    if (hasEC && hasNoble) isElec = true;
+                }
+                if (isElec) { archetype = EngineArchetype.Electric; return; }
+            }
+
             ModuleEngines e = engines[0];
             float vacIsp = e.atmosphereCurve.Evaluate(0f);
 
-            // 2. Exotic (ISP > 3000 or specific resources)
+            // 5. Exotic (ISP > 2850 or specific resources)
             if (vacIsp > 3000f || part.Resources.Contains("Antimatter") || part.Resources.Contains("Gravioli") || part.Resources.Contains("WarpDrive"))
             { 
                 archetype = EngineArchetype.Exotic; 
                 return; 
             }
 
-            // 3. Advanced (ISP > 500)
+            // 6. Advanced (ISP > 500)
             if (vacIsp > 500f) 
             { 
                 archetype = EngineArchetype.Advanced; 
                 return; 
             }
 
-            // 4. Electric (Standard electric types or Noble gases)
-            bool isElec = e.engineType == EngineType.Electric;
-            if (!isElec)
-            {
-                foreach (var prop in e.propellants)
-                {
-                    if (prop.name == "ElectricCharge")
-                    {
-                        foreach (var p2 in e.propellants)
-                            if (ElectricPropellants.Contains(p2.name)) { isElec = true; break; }
-                    }
-                }
-            }
-            if (isElec) { archetype = EngineArchetype.Electric; return; }
-
-            // 5. Airbreathing (Intake resources)
-            foreach (var prop in e.propellants)
-                if (prop.name == "IntakeAir" || prop.name == "IntakeAtm") { archetype = EngineArchetype.Airbreathing; return; }
-
-            // 6. Hypergolic (Chemical list)
+            // 7. Hypergolic (Chemical list)
             if (e.propellants.Count >= 2)
             {
                 foreach (var prop in e.propellants)
                     if (HypergolicPropellants.Contains(prop.name)) { archetype = EngineArchetype.Hypergolic; return; }
             }
 
-            // 7. Monopropellant (Solo fuel)
+            // 8. Monopropellant (Solo fuel)
             if (e.propellants.Count == 1 && (e.propellants[0].name == "MonoPropellant" || e.propellants[0].name == "Hydrazine"))
             { archetype = EngineArchetype.Monopropellant; return; }
 
-            // 8. Bipropellant (Oxidizer base)
+            // 9. Bipropellant (Oxidizer base)
             foreach (var prop in e.propellants)
                 if (prop.name == "LqdOxygen" || prop.name == "Oxidizer") { archetype = EngineArchetype.Bipropellant; return; }
 
-            // 9. Solid (SolidFuel / SolidBooster type)
+            // 10. Solid (SolidFuel / SolidBooster type)
             if (e.engineType == EngineType.SolidBooster || part.Resources.Contains("SolidFuel")) 
             { 
                 archetype = EngineArchetype.Solid; 
                 return; 
             }
 
-            // 10. Thermodynamic (Standard liquid fallback)
+            // 11. Thermodynamic (Standard liquid fallback)
             archetype = EngineArchetype.Thermodynamic;
         }
 
@@ -925,8 +988,13 @@ namespace KerbalEngineDynamics
             // Batch ID is shared per part name on the vessel
             batchId = $"{vessel.id}_{part.partInfo.name}";
             
-            // Generate Serial Number
-            serialNumber = $"{DateTime.Now.Year}-{part.partInfo.name.Substring(0, Mathf.Min(3, part.partInfo.name.Length)).ToUpper()}-{UnityEngine.Random.Range(100, 999)}";
+            // Generate Serial Number based on Game Time (UT)
+            double ut = Planetarium.GetUniversalTime();
+            int year = (int)(ut / KSPUtil.dateTimeFormatter.Year) + 1;
+            int day = (int)((ut % KSPUtil.dateTimeFormatter.Year) / KSPUtil.dateTimeFormatter.Day) + 1;
+            
+            string partSlug = part.partInfo.name.Substring(0, Mathf.Min(3, part.partInfo.name.Length)).ToUpper();
+            serialNumber = $"Y{year}-D{day}-{partSlug}-{UnityEngine.Random.Range(100, 999)}";
 
             // Roll for Lemon
             // P(Lemon) = MaturityAnchor + (Engine Count - 1) * 0.0167
@@ -1066,12 +1134,13 @@ namespace KerbalEngineDynamics
             if (!HighLogic.LoadedSceneIsFlight || engineModules.Count == 0) return;
 
             // --- MULTI-FAULT ENFORCEMENT ---
-            if (HasFailure(1) || HasFailure(2))
+            if (HasFailure(1) || HasFailure(2) || HasFailure(5))
             {
                 for (int i = 0; i < engineModules.Count; i++) 
                 { 
-                    engineModules[i].Shutdown(); 
-                    engineModules[i].allowRestart = false; 
+                    if (engineModules[i].EngineIgnited) engineModules[i].Shutdown(); 
+                    if (engineModules[i].allowRestart) engineModules[i].allowRestart = false; 
+                    if (!engineModules[i].flameout) engineModules[i].flameout = true;
                 }
             }
 
@@ -1226,7 +1295,7 @@ namespace KerbalEngineDynamics
                 uiState = "Nominal";
             }
 
-            if (atmSensitivityIndex > 1.5f && pressure > 0.5f) // Vacuum engine in thick air
+            if (atmSensitivityIndex > 1.5f && pressure > 0.5f && archetype != EngineArchetype.Nuclear && archetype != EngineArchetype.Electric && archetype != EngineArchetype.Exotic) // Vacuum engine in thick air
             {
                 float flameoutProbPerSec = 0.05f * (atmSensitivityIndex - 1.25f) * KEDSettings.globalRiskMultiplier;
                 double p_survival = Math.Pow(1.0 - (double)flameoutProbPerSec, deltaT);
@@ -1258,6 +1327,8 @@ namespace KerbalEngineDynamics
         private void TriggerFailure(int forcedMode = 0)
         {
             int mode = forcedMode;
+            bool isHighTech = (archetype == EngineArchetype.Nuclear || archetype == EngineArchetype.Electric || archetype == EngineArchetype.Exotic);
+
             if (mode == 0)
             {
                 List<int> validModes = new List<int>();
@@ -1266,16 +1337,11 @@ namespace KerbalEngineDynamics
                 if (archetype == EngineArchetype.Solid) { validModes.Add(5); }
                 else
                 {
-                    // Flameout is universal for liquids/electric/air
-                    if (!HasFailure(2)) validModes.Add(2);
-
-                    if (archetype == EngineArchetype.Bipropellant || archetype == EngineArchetype.Thermodynamic || archetype == EngineArchetype.Advanced || archetype == EngineArchetype.Nuclear)
-                        if (!HasFailure(1)) validModes.Add(1);
-
-                    if (archetype == EngineArchetype.Hypergolic || archetype == EngineArchetype.Monopropellant || archetype == EngineArchetype.Electric || archetype == EngineArchetype.Bipropellant || archetype == EngineArchetype.Thermodynamic || archetype == EngineArchetype.Advanced || archetype == EngineArchetype.Nuclear)
-                        if (!HasFailure(4)) validModes.Add(4);
-
-                    if (cachedGimbal != null && !HasFailure(3)) validModes.Add(3);
+                    // Allow up to 3 failures per mode for separate buttons
+                    if (GetFailureCount(1) < 3) validModes.Add(1);
+                    if (!isHighTech && GetFailureCount(2) < 3) validModes.Add(2);
+                    if (!isHighTech && GetFailureCount(4) < 3) validModes.Add(4);
+                    if (cachedGimbal != null && GetFailureCount(3) < 3) validModes.Add(3);
                 }
 
                 if (validModes.Count > 0)
@@ -1299,7 +1365,12 @@ namespace KerbalEngineDynamics
                         mode = validModes[UnityEngine.Random.Range(0, validModes.Count)];
                     }
                 }
-                else return; // All systems already failed
+                else return; // All slots full
+            }
+            else
+            {
+                // Forbidden modes for high-tech engines
+                if (isHighTech && (mode == 2 || mode == 4)) return;
             }
 
             // --- WARP DROP LOGIC ---
@@ -1342,12 +1413,22 @@ namespace KerbalEngineDynamics
                 case 1: // Ignition Fail
                     msg = "Ignition Failure";
                     uiState = "FAULT (Injector Lockout)";
-                    for (int i = 0; i < engineModules.Count; i++) { engineModules[i].Shutdown(); engineModules[i].allowRestart = false; }
+                    for (int i = 0; i < engineModules.Count; i++) 
+                    { 
+                        engineModules[i].Shutdown(); 
+                        engineModules[i].allowRestart = false; 
+                        engineModules[i].flameout = true;
+                    }
                     break;
                 case 2: // Flameout
                     msg = "Sudden Flameout";
                     uiState = "FAULT (Flameout)";
-                    for (int i = 0; i < engineModules.Count; i++) { engineModules[i].Shutdown(); engineModules[i].allowRestart = false; }
+                    for (int i = 0; i < engineModules.Count; i++) 
+                    { 
+                        engineModules[i].Shutdown(); 
+                        engineModules[i].allowRestart = false; 
+                        engineModules[i].flameout = true;
+                    }
                     break;
                 case 3: // Gimbal Lock
                     msg = "Gimbal Seized";
@@ -1359,7 +1440,7 @@ namespace KerbalEngineDynamics
                     msg = (archetype == EngineArchetype.Monopropellant) ? "Catalyst Decay" : "Valve Seep";
                     uiState = (archetype == EngineArchetype.Monopropellant) ? "DEGRADED (Catalyst Decay)" : "DEGRADED (Valve Seep)";
                     color = "#FFA500";
-                    performanceMultiplier = 0.6f; // 40% loss
+                    performanceMultiplier *= 0.8f; // Stackable 20% loss
                     performanceScars++;
                     for (int i = 0; i < engineModules.Count; i++) 
                     { 
@@ -1371,7 +1452,16 @@ namespace KerbalEngineDynamics
                     uiState = "DESTROYED";
                     color = "#CC0000";
                     if (maturityLevelAtLaunch < 2) part.explode();
-                    else { for (int i = 0; i < engineModules.Count; i++) { engineModules[i].Shutdown(); engineModules[i].maxThrust = 0; } part.Die(); }
+                    else 
+                    { 
+                        for (int i = 0; i < engineModules.Count; i++) 
+                        { 
+                            engineModules[i].Shutdown(); 
+                            engineModules[i].maxThrust = 0; 
+                            engineModules[i].flameout = true;
+                        } 
+                        part.Die(); 
+                    }
                     break;
             }
 
@@ -1383,8 +1473,8 @@ namespace KerbalEngineDynamics
             // Failure Cascade (5-10%)
             if (UnityEngine.Random.value < 0.08f) TriggerCascade();
 
-            Events["RepairEngine"].active = (mode != 5 && (archetype != EngineArchetype.Exotic || maturityLevelAtLaunch >= 1));
             Events["RunDiagnostics"].active = true;
+            RefreshUI();
         }
 
         private void TriggerCascade()
@@ -1415,10 +1505,28 @@ namespace KerbalEngineDynamics
 
             diagnosticsRun = true;
             KEDEvents.OnMaturityGained.Fire(part.partInfo.name, 5f); // Inspection Bonus
-            string report = isWeakUnit ? "WEAK UNIT DETECTED. Critical failure imminent." : "Core systems nominal.";
-            if (IsFailed) report = $"MULTIPLE FAULTS IDENTIFIED: {uiState}";
             
-            ScreenMessages.PostScreenMessage($"[KED] DIAGNOSTICS ({serialNumber}): {report}", 8f, ScreenMessageStyle.LOWER_CENTER);
+            List<string> details = new List<string>();
+            if (HasFailure(1)) details.Add($"Ignition System: {GetFailureCount(1)} fault(s) detected.");
+            if (HasFailure(2)) details.Add($"Combustion Stability: {GetFailureCount(2)} flameout event(s) recorded.");
+            if (HasFailure(3)) details.Add($"Thrust Vectoring: {GetFailureCount(3)} actuator(s) seized.");
+            if (HasFailure(4)) details.Add($"Flow Regulation: {GetFailureCount(4)} valve(s) degraded. Efficiency: {performanceMultiplier:P1}");
+            
+            string statusReport = (details.Count > 0) ? string.Join("\n", details.ToArray()) : "Core systems within nominal tolerances.";
+            
+            // Reliability Forecast
+            string forecast = "Reliability Forecast: OPTIMAL";
+            if (isWeakUnit) forecast = "Reliability Forecast: CRITICAL (Structural Weakness)";
+            else if (ignitionFatigue > 0.2f) forecast = "Reliability Forecast: POOR (Thermal Fatigue)";
+            else if (ignitionFatigue > 0.05f) forecast = "Reliability Forecast: STRETCHED";
+            
+            string finalReport = $"[KED] DIAGNOSTICS REPORT - S/N {serialNumber}\n" +
+                                 $"--------------------------------------------------\n" +
+                                 $"{statusReport}\n" +
+                                 $"--------------------------------------------------\n" +
+                                 $"{forecast}";
+
+            ScreenMessages.PostScreenMessage(finalReport, 12f, ScreenMessageStyle.LOWER_CENTER);
             Events["PreventativeMaintenance"].active = (isWeakUnit && !IsFailed);
         }
 
@@ -1610,20 +1718,38 @@ namespace KerbalEngineDynamics
             if (newTotal >= totalCost)
             {
                 SetInvestedKits(mode, 0);
-                SetFailure(mode, false);
-                isLemon = false; // Successfully repaired unit is no longer a "Lemon"
-                isWeakUnit = false;
-                failureTriggerTime = -1;
-                performanceMultiplier *= 0.98f; // Compounding 2% penalty
+                SetFailure(mode, false); // Decrements count
                 
-                if (mode == 1 || mode == 2)
-                {
-                    for (int i = 0; i < engineModules.Count; i++) { engineModules[i].allowRestart = true; }
-                }
-                if (mode == 3 && cachedGimbal != null) { cachedGimbal.gimbalLock = false; }
                 if (mode == 4)
                 {
-                    for (int i = 0; i < engineModules.Count; i++) { engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; }
+                    performanceMultiplier /= 0.8f; // Recover the 20% loss
+                    performanceScars++; // Permanent scar from the event
+                    // Apply scar penalty: -2%
+                    performanceMultiplier *= 0.98f;
+                }
+                else
+                {
+                    performanceMultiplier *= 0.99f; // Standard repair scar: -1%
+                }
+
+                isLemon = false; 
+                isWeakUnit = false;
+                failureTriggerTime = -1;
+                
+                if (GetFailureCount(1) == 0 && GetFailureCount(2) == 0)
+                {
+                    for (int i = 0; i < engineModules.Count; i++) 
+                    { 
+                        engineModules[i].allowRestart = true; 
+                        engineModules[i].flameout = false;
+                    }
+                }
+                
+                if (GetFailureCount(3) == 0 && cachedGimbal != null) { cachedGimbal.gimbalLock = false; }
+                
+                for (int i = 0; i < engineModules.Count; i++) 
+                { 
+                    engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; 
                 }
 
                 KEDEvents.OnMaturityGained.Fire(part.partInfo.name, 10f);
@@ -1738,8 +1864,37 @@ namespace KerbalEngineDynamics
         [KSPEvent(guiActive = true, guiName = "Force New Batch", groupName = "KED_Debug")]
         public void ForceNewBatch()
         {
+            // Reset all similar engines first
+            List<KEDModule> siblings = new List<KEDModule>();
+            foreach (Part p in vessel.parts)
+            {
+                if (p.partInfo.name == part.partInfo.name)
+                {
+                    var m = p.FindModuleImplementing<KEDModule>();
+                    if (m != null)
+                    {
+                        m.batchId = "";
+                        m.isLemon = false;
+                        m.isWeakUnit = false;
+                        m.failureTriggerTime = -1;
+                        m.srbFailureFuelThreshold = -1f;
+                        siblings.Add(m);
+                    }
+                }
+            }
+
+            // Perform a single initialization which will distribute effects
             InitializeBatch();
-            ScreenMessages.PostScreenMessage("Debug: Rerolling Batch...", 5f, ScreenMessageStyle.UPPER_CENTER);
+            
+            // Sync the lemon/batchId/hint to all siblings for UI consistency
+            foreach (var m in siblings)
+            {
+                m.batchId = this.batchId;
+                m.isLemon = this.isLemon;
+                m.uiBatchHint = this.uiBatchHint;
+            }
+
+            ScreenMessages.PostScreenMessage($"Debug: Rerolled batch for {siblings.Count} engines.", 5f, ScreenMessageStyle.UPPER_CENTER);
         }
 
         [KSPEvent(guiActive = true, guiName = "Reset Fatigue", groupName = "KED_Debug")]
@@ -1773,6 +1928,7 @@ namespace KerbalEngineDynamics
             { 
                 engineModules[i].allowRestart = true; 
                 engineModules[i].maxThrust = prefabMaxThrusts[i]; 
+                engineModules[i].flameout = false;
             }
 
             if (cachedGimbal != null) cachedGimbal.gimbalLock = false;

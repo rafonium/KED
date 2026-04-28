@@ -1,4 +1,4 @@
-# KED 3.0 — Engine Overhaul: Updated Implementation Plan
+# KED — Engine Overhaul Design Document
 
 ## Overview
 
@@ -148,7 +148,7 @@ public enum EngineArchetype {
 1.  **Nuclear**: 
     - Part contains `EnrichedUranium` resource.
 2.  **Exotic**: 
-    - Vacuum ISP > 3000 OR uses `Antimatter`, `Gravioli`, or `WarpDrive` related resources.
+    - Vacuum ISP > 2850 OR uses `Antimatter`, `Gravioli`, or `WarpDrive` related resources.
 3.  **Advanced**: 
     - Vacuum ISP > 500 (Catches high-performance Hydrolox/Methalox before they hit the Bipropellant trap).
 4.  **Electric**: 
@@ -176,10 +176,10 @@ All mechanical failures are consolidated into five distinct states. These replac
 
 | Failure Mode | Description | Archetype Application |
 | :--- | :--- | :--- |
-| **Ignition Fail** | Engine fails to start; prevents further restart attempts until repaired. | Biprop, Thermo, Advanced, Nuclear. |
-| **Flameout** | Sudden engine shutdown during burn; prevents restart. | All Liquid/Electric/Airbreathing. |
+| **Ignition Fail** | Engine fails to start; prevents further restart attempts until repaired. | Biprop, Thermo, Advanced, Nuclear, Electric, Exotic. |
+| **Flameout** | Sudden engine shutdown during burn; prevents restart. | Biprop, Thermo, Advanced, Airbreathing. (Nuclear, Electric, Exotic are immune). |
 | **Gimbal Lock** | Vectoring actuators seize in current position. | Any engine with a gimbal. |
-| **Thrust Drop** | Performance capped at 60%; applies "Performance Scar". | Hypergolic, Monoprop, Electric. |
+| **Thrust Drop** | Performance capped at 60%; applies "Performance Scar". | Hypergolic, Monoprop. (Nuclear, Electric, Exotic are immune). |
 | **Explode** | Casing breach leading to part destruction. | **Solid (SRB)**; Safe Abort maturity allows engine death without explosion. |
 
 ### 3.4 Failure Cascades

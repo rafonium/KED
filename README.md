@@ -1,4 +1,4 @@
-# Kerbal Engine Dynamics (KED) 1.0
+# Kerbal Engine Dynamics (KED)
 
 **Kerbal Engine Dynamics (KED)** is a total overhaul of engine reliability for Kerbal Space Program. It introduces a **manufacturing-first model**, where engines are defined by their production batches, operational history, and technological maturity rather than simple random numbers.
 
@@ -36,9 +36,9 @@ KED 1.0 identifies hardware through prioritized resource detection, ensuring mod
 
 | Archetype | Identity & Key Failure Modes | Maturity Focus |
 | :--- | :--- | :--- |
-| **Nuclear** | Heavy thermal load; requires Lvl 3+ Engineer for repairs. | Core Stability |
-| **Electric** | Ion/Plasma thrusters; prone to thrust-capping surges. | Deep Space Endurance |
-| **Exotic** | Antimatter/Warp tech; nearly perfect but unrepairable at first. | Advanced Materials |
+| **Nuclear** | Heavy thermal load; requires Lvl 3+ Engineer for repairs. (Flameout Immune). | Core Stability |
+| **Electric** | Ion/Plasma thrusters; prone to ignition faults. (Flameout/Thrust Immune). | Deep Space Endurance |
+| **Exotic** | Antimatter/Warp tech; Nearly perfect. (Flameout/Thrust Immune). | Advanced Materials |
 | **Solid (SRB)** | High-stress casing; guaranteed safe for first 10s; explodes at 50%. | Structural Integrity |
 | **Airbreathing** | Jet turbines; sensitive altitude/velocity "Safety Envelopes." | Turbine Health |
 | **Hypergolic** | Corrosion-heavy; "Soft" valve failures vs "Hard" lockouts. | Valve Durability |
@@ -57,9 +57,9 @@ Engineers are no longer just repair technicians; they are vital field assets.
 *   **Hardware Retrofit**: Upgrade active vessels to current Agency Standards. Perform a retrofit on EVA to update an engine's Maturity Level to the latest global stats.
 *   **The Unified Failure Palette**:
     *   🔴 **Ignition Fail**: Total injector lockout at start.
-    *   🔴 **Flameout**: Sudden shutdown during burn.
+    *   🔴 **Flameout**: Sudden shutdown during burn. (Rocket/Airbreathing only).
     *   🔴 **Explode**: Catastrophic casing breach (SRB Only).
-    *   🟠 **Thrust Drop**: Performance capped (e.g., Valve Seep).
+    *   🟠 **Thrust Drop**: Performance capped.
     *   🟡 **Gimbal Lock**: Vectoring actuators seized.
 
 ---
