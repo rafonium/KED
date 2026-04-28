@@ -12,12 +12,13 @@ This plan replaces the existing per-engine stochastic model with a **Batch Quali
 
 | Question | Decision |
 |---|---|
-| **Batch Reveal Timing** | **Permanently hidden.** The player never sees the batch quality roll. Pure risk. |
+| **Batch Reveal Timing** | **Hidden by default.** Player can reveal Lemon status via `CycleValves` (Hypergolic) or `Deep Diagnostics` (EVA). |
 | **Cross-Engine Batch Grouping** | **Per part name only.** Different part names = different batches, always. |
-| **Weak Unit After Repair** | **Restored but degraded.** Performance penalties apply (ISP/Thrust) and future fatigue increases. |
-| **Nuclear Repair Access** | **Engineer Level 3+ required** to repair a failed nuclear engine. No new item type needed. |
-| **ASI for Modded Engines** | Retain Q3 as an open implementation detail — add a `[KED_ASI_OVERRIDE]` config field for mod compatibility. |
-| **Batch Lineage** | **Linked across launches.** Batches are not fully independent; "manufacturingSeed" creates production runs. |
+| **Weak Unit After Repair** | **Restored but degraded.** Performance penalties apply (ISP/Thrust) and future fatigue increases (Scars). |
+| **Repair System** | **Partial Repair Logic.** Engineers can invest kits over multiple sessions. Costs scale with Engineer Level. |
+| **Nuclear Repair Access** | **Engineer Level 3+ required** to repair or diagnostic a nuclear engine. |
+| **ASI for Modded Engines** | Automated detection via ISP curve — uses `[KED_ASI_OVERRIDE]` if needed. |
+| **Batch Lineage** | **Linked across launches.** `LineageRisk` tracks production quality (Lemons increase risk, Goods decrease it). |
 
 ---
 
@@ -29,11 +30,16 @@ When a vessel is launched, every engine of the **same part name** on that rocket
 
 - Batch ID generated once at launch, stored in vessel persistent data.
 - Engines of **different part names** are always separate batches.
-- **Batch Lineage (Anti-Exploit)**: Each engine part has a hidden `manufacturingSeed`. Batches across launches are **not fully independent**. If a part name gets a "Lemon" result, the probability of a Lemon in the next launch of that same part is slightly increased temporarily (simulating a "bad production run"). This prevents farming safe batches with single-engine test flights.
-- **Diegetic Pre-Launch Hints**: While the roll is hidden, the Factory Specification or Launchpad PAW may show subtle, non-deterministic hints:
+- **Batch Lineage (Dynamic Risk)**: If a part name gets a "Lemon" result, the `LineageRisk` increases by 5%. Successful "Good" batches reduce it by 2%. This simulates production quality fluctuations.
+- **Aging Factor**: Once an engine model passes its `AgingThreshold` (Default: 50 flights), its reliability starts to decay globally, increasing the base Lemon probability.
+- **Diegetic Pre-Launch Hints**: While the roll is hidden, the Factory Specification or Launchpad PAW shows correlated hints:
   - *"Factory QA Note: Slight variance detected in turbopump alignment."*
   - *"Batch vibration signature above nominal."*
-  - These hints are ~60-70% correlated with a Lemon status, allowing players to develop a "gut feeling" without UI-spam.
+  - These hints are ~70% correlated with a Lemon status.
+- **Controlled Chaos (Variance):** 
+    - **80% Cases:** Exactly 1 Weak Unit.
+    - **15% Cases:** 2 Weak Units (Rare "double fault").
+    - **5% Cases:** **Degraded Batch** (All engines in the batch suffer immediate Thrust Drop penalties).
 
 ### 1.2 The Reliability Formula (Binary Batch System)
 The **Binary Batch System (BQS)** for KED 3.0 replaces complex stochastic reliability with a streamlined manufacturing model. All engines of the same part name on a vessel share a single batch identity, which is rolled at launch to determine if the lot is **Good** or a **Lemon**.
@@ -53,18 +59,12 @@ The probability of a "Lemon" batch scales linearly with the number of engines in
 ### 1.3 The Weak Unit Mechanic
 If a batch is rolled as a **Lemon**, the group is designated for potential failure.
 
-*   **Controlled Chaos (Variance):** Instead of exactly one Weak Unit, the system uses a probability spread:
-    - **80% Cases:** Exactly 1 Weak Unit (current standard).
-    - **15% Cases:** 2 Weak Units (Rare "double fault" event).
-    - **5% Cases:** No Weak Unit, but **Degraded Batch** (All engines in the batch suffer soft failures/thrust drops).
-*   **Cumulative Timer:** The Weak Unit trigger window tracks **cumulative running time** across all ignitions.
-*   **SRB Spread Window:** SRBs are guaranteed safe for the first 10s. The failure window is **40% – 70% fuel**, with peak probability at 50%. This prevents "safe cheese timing" by staging exactly at the 50% mark.
-*   **Impulse Failures:** Failures occur suddenly without explicit pre-failure sensory cues, requiring players to react to the failure state itself. (Note: Pre-failure jitter/twitch removed).
-*   **Repair Recovery:** Successfully performing an EVA repair on a Weak Unit clears the "Lemon" flag but applies a **Hidden Penalty** (e.g., -1-2% ISP or increased future ignition fatigue). Recovery is not a "perfect reset."
-
-
-
-
+*   **Controlled Chaos (Variance):** Instead of exactly one Weak Unit, the system uses a probability sp*   **Deterministic Triggers:** KED 3.0 uses a fuel-based or time-based **Failure Trigger Time**. This eliminates frame-rate dependence.
+*   **Trigger Windows:**
+    - **Liquid/Electric:** Randomly designated window between 15s and 50s of cumulative burn time.
+    - **SRB Spread Window:** Guaranteed safe for the first 10s. The failure trigger is rolled as a **fuel threshold** between 40% – 70% remaining fuel, peaking at 50%.
+*   **Impulse Failures:** Failures occur suddenly without explicit pre-failure sensory cues (Jitter removed).
+*   **Repair Recovery:** Successfully performing an EVA repair clears the "Lemon" flag but applies a **Performance Scar** (-2% Thrust or ISP depending on archetype). Recovery is not a "perfect reset."
 
 ### 1.5 Why Multi-Engine Tests Fail
 
@@ -76,10 +76,10 @@ Even **Good** batches still wear over time:
 
 | Degradation | Trigger | Effect |
 |---|---|---|
-| Ignition Fatigue | Each start/stop cycle | Cumulative ignition penalty per restart |
-| Catalyst Decay | Cumulative burn seconds (Monoprop) | Exponential decay after service limit |
-| Thermal Cycling | Cold restarts (Thermodynamic/Nuclear) | Increased gimbal and running instability |
-| **Aging Factor** | Heritage engines (X+ flights) | Legacy engines eventually gain "Aging Risk," slowly increasing base failure probability again. |
+| Ignition Fatigue | Each start/stop cycle | Stacking failure risk. Multiplied if starting "Booster" engines in vacuum. |
+| Catalyst Decay | Cumulative burn seconds | Exponential decay after `CatalystServiceLimit`. Leads to Thrust Drops. |
+| Hypergolic Fatigue | Each ignition | Stacking +0.5% failure risk per cycle. |
+| **Aging Factor** | Heritage engines (50+ flights) | Base Lemon probability increases per flight after threshold. |
 
 ### 1.7 Pre-Launch Logistics
 Players can make strategic decisions before launch to influence batch quality:
@@ -176,11 +176,14 @@ All mechanical failures are consolidated into five distinct states. These replac
 
 | Failure Mode | Description | Archetype Application |
 | :--- | :--- | :--- |
-| **Ignition Fail** | Engine fails to start upon activation. | Bipropellant, Thermodynamic, Advanced. |
-| **Flameout** | Sudden engine shutdown during a sustained burn. | All Liquid/Electric/Airbreathing archetypes. |
-| **Gimbal Lock** | Vectoring actuators seize; steering is lost. | Any engine equipped with a gimbal. |
-| **Thrust Drop** | Performance is capped; Limiter locked to <100%. | Hypergolic, Monopropellant, Electric. |
-| **Explode** | Structural casing breach leading to part destruction. | **Solid (SRB) only**; triggered at 50% fuel peak (Guaranteed safe for first 10s). |
+| **Ignition Fail** | Engine fails to start; prevents further restart attempts until repaired. | Biprop, Thermo, Advanced, Nuclear. |
+| **Flameout** | Sudden engine shutdown during burn; prevents restart. | All Liquid/Electric/Airbreathing. |
+| **Gimbal Lock** | Vectoring actuators seize in current position. | Any engine with a gimbal. |
+| **Thrust Drop** | Performance capped at 60%; applies "Performance Scar". | Hypergolic, Monoprop, Electric. |
+| **Explode** | Casing breach leading to part destruction. | **Solid (SRB)**; Safe Abort maturity allows engine death without explosion. |
+
+### 3.4 Failure Cascades
+Failures have an **8% chance** to trigger a chain reaction in symmetry counterparts, representing shared vibration or fuel manifold issues.
 
 
 ### 3.4 Verification Plan (Archetype Accuracy)
@@ -203,19 +206,14 @@ This overhaul replaces the dense, 6-tier CTU spreadsheets with a streamlined mat
 
 ### 4.1 The New Currency: Maturity Points (MP)
 Instead of tracking thousands of points, we use a low-digit MP system.
-*   **Engine Start:** $+1$ MP (Once per flight; only if vessel state is `FLYING` or altitude $> 100$m).
-*   **Full Burn:** $+2$ MP (Burn exceeds 60 seconds).
-    *   **Bonus +5 MP:** Earned if an engineer performs an inspection on an engine from that batch, or if that batch is recovered (Recovery bonus only triggers if vessel reached `SubOrbital` or greater).
+*   **Engine Start:** $+1$ MP (Once per flight; only if vessel is `FLYING` or altitude $> 100$m).
+*   **Full Burn:** $+2$ MP (Burn exceeds 60 cumulative seconds).
+*   **Inspection/Recovery:** $+5$ MP (Earned if an engineer performs a Diagnostic or if the part is recovered from `SubOrbital`+).
 *   **The Hard Lesson:** $+10$ MP (Earned if you successfully perform an EVA repair on a failed engine).
 *   **Archetype Heritage:** Newly unlocked parts receive **20% of the MP** from the most experienced part in the same archetype.
-*   **Identity & Reputation (Immersion):** Engines gain personality as they mature.
-    - **Renaming:** At certain thresholds, engine lines are renamed internally (e.g., "LV-T45 Block II", "LV-T45 Heritage Line").
-    - **Historical Stats:** The PAW/Tooltip shows historical performance:
-      - *Flights: 23*
-      - *Failures: 2*
-      - *Success Rate: 91%*
-    - Players develop emotional attachment: *"This engine family has never failed me... until it does."*
-*   **Aging & Legacy Risk:** Even "Heritage" engines are not immune to time. After X total flights (e.g., 50+), an "Aging Factor" applies, slowly increasing the failure probability again. This encourages lifecycle management: "Retire this engine line or risk it?"
+*   **Identity & Reputation (Immersion):** Engines gain branding as they mature.
+    - **Branding:** 0 MP = "Prototype", L1 = "Block I", L2 = "Block II", L3+ = "Heritage Line".
+    - **Historical Stats:** PAW shows: *Flights: X | Success: Y%*
 
 
 ### 4.2 The Roadmaps
@@ -265,10 +263,15 @@ Instead of tracking thousands of points, we use a low-digit MP system.
 
 | Level | Name | MP Req | Reliability Impact |
 | :--- | :--- | :--- | :--- |
-| **0** | **Baseline** | 0 | **Hard Lockout:** Failure results in total thrust loss. |
-| **1** | **Stabilized** | 60 | **Corrosion Resistance:** Lemon unit corrosion/decay rate penalty halved. |
-| **2** | **Proven** | 150 | **Valve Seep:** Failures become "Soft" (5% thrust loss instead of total lockout). |
-| **3** | **Heritage** | 300 | **Infinite Life:** Catalyst service limits doubled; first failure is always restorable via EVA. |
+| **0** | **Baseline** | 0 | **Hard Lockout:** Failure results in total shutdown. |
+| **1** | **Stabilized** | 60 | **Maintenance Access:** Enables `CatalystSwap` and `NitrogenPurge` EVA actions. |
+| **2** | **Proven** | 150 | **Valve Seep:** Failures become "Soft" (Thrust Drop) instead of flameouts. |
+| **3** | **Heritage** | 300 | **Extended Life:** Catalyst limits doubled; first failure is restorable. |
+
+**Tactical EVA Actions:**
+- **Catalyst Swap (Monoprop):** Costs 1 Kit + 5 EC. Resets cumulative burn time (Catalyst life) and removes 1 Performance Scar.
+- **Nitrogen Purge (Hypergolic):** Costs 1 Kit. Halves current Ignition Fatigue and removes 1 Performance Scar.
+- **Cycle Valves (Hypergolic):** (Lvl 1+ Engineer) 50% chance to reveal Weak Unit; 5% risk of accidental ignition pulse or gimbal lock.
 
 ---
 
@@ -308,33 +311,35 @@ To keep this elegant and persistent across launches, maturity is tracked globall
 ### 4.4 Advanced Engineering Actions (EVA Only)
 
 #### 1. Hardware Retrofit
-*   **Context**: Engines launched years ago may have outdated specs.
-*   **Mechanic**: A Level 2+ Engineer can perform a "Hardware Retrofit" to bring an engine up to modern standards.
-*   **Requirement**:
-    *   **Engineer Level 2+**.
-    *   **5-10 EVA Repair Kits** (Cost scales: 5 for Solid/Monoprop, 7 for Biprop/Airbreathing, 10 for Nuclear/Electric/Exotic).
-    *   **Inventory Logic**: Repair kits can be pulled directly from the vessel's cargo storage if the Engineer is within 5m of the engine, bypassing Kerbal inventory limits.
-*   **Effect**: Updates the `MaturityLevelAtLaunch` of the specific part instance to the current **Global Maturity Level** of that archetype.
-
-*   **Use Case**: Upgrading legacy hardware on long-term orbital stations or interplanetary craft.
+*   **Mechanic**: Brings an old part instance up to current Global Maturity standards.
+*   **Cost**: Scales by archetype (Default 5 kits, Hypergolic 7, Nuclear/Exotic 10-15).
+*   **Requirement**: Level 2+ Engineer.
 
 #### 2. Deep Diagnostics
-*   **Context**: Expansion of "The Hard Lesson".
-*   **Mechanic**: Before attempting a repair, an Engineer can "Run Diagnostics".
-*   **Pre-Failure Effect**:
-    *   **Requirement**: Maturity Level 2+ for that specific engine archetype.
-    *   **Insight**: Can reveal xif the engine is a **Weak Unit** (hidden Lemon status) before it ever fails.
-    *   **Preventative Maintenance**: Once a Weak Unit is identified, an Engineer can perform "Preventative Maintenance". This costs the same as a standard repair (EVA kits) but clears the Lemon flag immediately, preventing the catastrophic failure from occurring.
-    *   **SRB Note**: For Solid engines, diagnostics can identify a Weak Unit, but since they are non-repairable, the only action is to abort or stage early (Preventative Maintenance is not available for Solids).
-*   **Post-Failure Effect**:
+*   **Mechanic**: Identifies Weak Unit status (Lemon) before failure.
+*   **Requirement**: Level 2+ Engineer (Level 3+ for Nuclear).
+*   **Preventative Maintenance**: Once revealed, the Lemon flag can be cleared for the cost of a standard maintenance action (Default 2 kits), preventing the failure.
 
-    *   **Insight**: Identifies the exact failure mode (from the Unified Failure Palette).
-    *   **Efficiency**: Reduces the EVA Repair Kit cost by **1** (minimum 1) for the subsequent repair.
-    *   **Reward**: Still awards the "+10 MP (Hard Lesson)" upon successful repair.
+#### 3. Partial Repair Logic
+*   **Mechanic**: Engineers do not need to finish a repair in one go. Kits are "invested" into the part.
+*   **PAW Feedback**: `Repair: [Component] (X/Y kits invested)`.
+*   **Multi-Session**: Repairs can be resumed by different engineers or after a reload.
 
 ---
 
-## Part 5 — Unified Failure Palette (Detailed Breakdown)
+## Part 5 — System Integrations
+
+### 5.1 Background & Persistent Thrust
+KED 3.0 is fully integrated with **BackgroundThrust** and **PersistentThrust** for unloaded vessel support.
+
+*   **Offline Catch-up**: When a vessel is loaded, KED calculates the time elapsed since the last update.
+*   **Wear Processing**: If the engine was burning in the background, KED applies cumulative burn wear and catalyst decay.
+*   **Deterministic Failure**: If a Weak Unit's trigger time was passed during the background burn, the engine is set to the failure state upon loading, with a notification explaining the event.
+*   **Maturity Gains**: MP for "Full Burn" can be earned during background operations.
+
+---
+
+## Part 6 — Unified Failure Palette (Detailed Breakdown)
 
 | Failure Mode | Screen Message Example | KSP Text Color | PAW State Display | Trigger Mechanism | Repair / Recovery |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -376,62 +381,35 @@ The Part Action Window field `State: <Status>` sits directly below "Specific Imp
 
 ## Part 7 — Implementation Phases
 
-### Phase 1 — Data Layer
-- Implement `KEDScenario` (`ScenarioModule`) to store `Dictionary<string, float> GlobalEngineMaturity`.
-- Add `BatchQuality` enum and `batchId` / `batchQuality` per-vessel fields.
-- Add `weakUnitDesignated` bool per engine module (cleared on EVA repair).
-- Add `atmSensitivityIndex` float, computed from Isp curve at part load.
-- Replace `DetermineArchetype()` to use `EngineFilterLogic.md` priority chain with no UPI class tiers.
+### Phase 1 — Data Layer [COMPLETE]
+- `KEDScenario` implemented with global dictionaries.
+- `BatchQuality` and `isLemon`/`isWeakUnit` fields active.
+- `atmSensitivityIndex` automated detection active.
 
-### Phase 2 — Batch Roll Logic
-- Implement `BatchManager`: rolls quality per unique `(vesselId, partName)` pair at launch.
-- **Batch Lineage:** Integrate `manufacturingSeed` to influence Lemon probability based on previous launches of that part.
-- **Pre-Launch Hints:** Implement the logic for non-deterministic "QA Notes" in the Factory Specification/PAW.
-- **Controlled Chaos:** Implement the 80/15/5 variance for Weak Unit designation and Degraded Batches.
-- Store results in vessel persistent data.
+### Phase 2 — Batch Roll Logic [COMPLETE]
+- `BatchManager` rolls per part name at launch.
+- `LineageRisk` and `AgingFactor` influences active.
+- Controlled Chaos (80/15/5) implemented.
 
-### Phase 3 — Failure Logic Rewire
-- Replace per-engine RNG with batch-gated failure windows per archetype.
-- Implement `weakUnitFailureWindow` timer for each archetype (Cumulative).
-- **SRB Spread Window:** Implement the 40-70% failure window for Solids.
-- **Failure Impulse:** Ensure failures trigger cleanly according to the failure window without early cues.
-- **Failure Cascades:** Implement the logic for rare chain reactions between parts.
-- Implement **Screen Message Dispatcher** with queuing logic and KSP color-coding.
-- Implement PAW `State` field with dynamic "EVA Repair Req" strings.
-- Implement ASI-modulated ignition/running checks with PAW feedback.
+### Phase 3 — Failure Logic Rewire [COMPLETE]
+- Deterministic `failureTriggerTime` (Liquid) and `fuelThreshold` (SRB).
+- Multi-mode `activeFailuresMask` active.
+- Failure Cascades (8% chance) active.
 
+### Phase 4 — Operational Maturity Tracks [COMPLETE]
+- 6 Roadmap objects implemented.
+- Nuclear Lvl 3+ gates active.
+- Hardware Retrofit and Deep Diagnostics active.
 
-### Phase 4 — Operational Maturity Tracks
-- Implement 6 separate `MaturityRoadmap` objects (one per group defined in Part 4).
-- Wire batch roll Anchor and Complexity shifts to maturity level thresholds.
-- Implement Nuclear repair gate: check Engineer experience level before allowing interaction.
-- **Implement Hardware Retrofit**: Logic for updating `MaturityLevelAtLaunch` and repair kit consumption.
-- **Implement Deep Diagnostics**: Pre-failure "Weak Unit" reveal and post-failure cost reduction logic.
+### Phase 5 — UI & UX [COMPLETE]
+- Screen Message Dispatcher (Queued) active.
+- PAW updated with ASI, History, and State.
+- Branding (Block I/II/Heritage) active.
 
+### Phase 6 — Config & Compatibility [COMPLETE]
+- `KED_Settings.cfg` with full repair matrix.
+- `[KED_ASI_OVERRIDE]` support.
 
-### Phase 5 — UI & UX
-- **Remove all "Silent Anomaly" early warnings.**
-- Implement the **Screen Message Protocol** (7s duration, top-center).
-- **Identity & Reputation:** Add historical stats (Flights/Success) to tooltips and PAW. Implement engine line renaming.
-- **ASI Feedback:** Add real-time "Outside Optimal Band" PAW warnings and staging UI efficiency zones.
-- Add ASI value and maturity stats to Factory Specification tooltips.
-- Implement the `State: <Status>` field in the PAW for all engines.
-- Electric/Airbreathing: Retain live margin displays (Thrust/Power) as standard telemetry.
-
-
-### Phase 6 — Config & Compatibility
-- Add `[KED_ASI_OVERRIDE]` config key for mod-list compatibility.
-- Test archetype detection against: stock engines, Kerbal Atomics, Near Future Propulsion, Near Future Aeronautics, Far Future Technologies.
-
-### Phase 7 — Verification
-- Seed RNG batch rolls and verify probability table output per archetype.
-- **Test Batch Lineage:** Verify that Lemon results influence future launch probabilities.
-- **Test SRB Timing:** Confirm failures occur within the 40-70% window, not just at 50%.
-- **Test Failure Timing:** Verify failure effects trigger exactly at the designated failure time.
-- **Test Cascades:** Verify that rare chain reactions occur as intended.
-- **Test Repair Penalties:** Confirm that repaired engines suffer ISP/fatigue penalties.
-- Test Weak Unit designation, failure window timing, and repair-clearing behavior.
-- Test **Preventative Maintenance** flow for pre-failure Weak Units.
-- Test maturity MP accumulation (Launchpad Farming check) and level unlock triggers.
-- Test Nuclear Lvl 3+ gate: confirm Lvl 0-2 engineers cannot repair.
-- **Strict Unit Test**: Verify that "Sepratron" style engines (Solid fuel, small thrust) are correctly classified as **Solid** (#9) and not accidentally caught by **Monopropellant** (#7).
+### Phase 7 — Background Integration [COMPLETE]
+- UT-based catch-up logic for Background/Persistent Thrust.
+- Offline failure and wear processing.

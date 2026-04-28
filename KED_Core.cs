@@ -360,6 +360,8 @@ namespace KerbalEngineDynamics
         public string uiBatchHint = "Unknown";
         [KSPField(guiActive = true, guiName = "History", groupName = "KED")]
         public string uiHistory = "";
+        [KSPField(guiActive = true, guiName = "Performance", groupName = "KED")]
+        public string uiPerformance = "100%";
 
         // --- DEBUG UI ---
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "State", groupName = "KED_Debug", groupDisplayName = "DEBUG: ENGINE CONTROL")]
@@ -372,6 +374,10 @@ namespace KerbalEngineDynamics
         public string uiDebugRNG = "";
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Archetype", groupName = "KED_Debug")]
         public string uiDebugArchetype = "";
+        [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Perf", groupName = "KED_Debug")]
+        public string uiDebugPerformance = "";
+        [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Ignition", groupName = "KED_Debug")]
+        public string uiDebugIgnitionRel = "";
 
         [KSPField(isPersistant = true)] public EngineArchetype archetype = EngineArchetype.Thermodynamic;
         private bool lastIgnited = false;
@@ -595,6 +601,12 @@ namespace KerbalEngineDynamics
                 if (archetype == EngineArchetype.Hypergolic) tactInfo = $" | Ignitions: {ignitionCount}";
 
                 uiDebugArchetype = $"Type: {archetype} | ASI: {atmSensitivityIndex:F2} | Scars: {performanceScars}{tactInfo}";
+                uiDebugPerformance = $"{performanceMultiplier:P0}";
+                
+                float ignProb = ignitionFatigue * KEDSettings.globalRiskMultiplier;
+                if (maturityLevelAtLaunch >= 1) ignProb *= 0.5f;
+                if (maturityLevelAtLaunch >= 4) ignProb = Mathf.Min(0.01f, ignProb);
+                uiDebugIgnitionRel = $"{(1f - ignProb):P1}";
             }
         }
 
@@ -611,6 +623,10 @@ namespace KerbalEngineDynamics
             Fields["uiDebugRNG"].guiActiveEditor = show;
             Fields["uiDebugArchetype"].guiActive = show;
             Fields["uiDebugArchetype"].guiActiveEditor = show;
+            Fields["uiDebugPerformance"].guiActive = show;
+            Fields["uiDebugPerformance"].guiActiveEditor = show;
+            Fields["uiDebugIgnitionRel"].guiActive = show;
+            Fields["uiDebugIgnitionRel"].guiActiveEditor = show;
 
             Events["ForceLemon"].guiActive = show;
             Events["ForcePerfect"].guiActive = show;
@@ -742,6 +758,7 @@ namespace KerbalEngineDynamics
             
             float successRate = flightsCount > 0 ? (1f - (float)failuresCount / flightsCount) * 100f : 100f;
             uiHistory = $"Flights: {flightsCount} | Success: {successRate:F0}%";
+            uiPerformance = (performanceMultiplier >= 0.99f) ? "100%" : $"{performanceMultiplier:P0} [DEGRADED]";
             RefreshFaultUI();
         }
 
@@ -1148,6 +1165,9 @@ namespace KerbalEngineDynamics
             // Check for Ignition Failure
             float ignitionFailProb = ignitionFatigue * KEDSettings.globalRiskMultiplier;
             
+            // Pristine Vacuum Bonus: 10x reliability for Good batches in space
+            if (!isLemon && atmSensitivityIndex > 1.25f && pressure < 0.1f) ignitionFailProb *= 0.1f;
+
             // Qualified level reduces fatigue influence
             if (maturityLevelAtLaunch >= 1) ignitionFailProb *= 0.5f;
             // Masterwork caps ignition failure
@@ -1192,8 +1212,8 @@ namespace KerbalEngineDynamics
             // Vacuum Bonus: Reliability improves as pressure drops below threshold
             if (atmSensitivityIndex > 1.25f && pressure < 0.1f)
             {
-                // Reduce failure window probability or delay triggers
-                if (isWeakUnit) failureTriggerTime += deltaT * (atmSensitivityIndex - 1.25f);
+                // [DEPRECATED] failureTriggerTime += deltaT * (atmSensitivityIndex - 1.25f);
+                // Now handled via weighted failure modes in TriggerFailure()
             }
 
             // Atmospheric Band Warning in PAW
@@ -1252,13 +1272,33 @@ namespace KerbalEngineDynamics
                     if (archetype == EngineArchetype.Bipropellant || archetype == EngineArchetype.Thermodynamic || archetype == EngineArchetype.Advanced || archetype == EngineArchetype.Nuclear)
                         if (!HasFailure(1)) validModes.Add(1);
 
-                    if (archetype == EngineArchetype.Hypergolic || archetype == EngineArchetype.Monopropellant || archetype == EngineArchetype.Electric || archetype == EngineArchetype.Bipropellant)
+                    if (archetype == EngineArchetype.Hypergolic || archetype == EngineArchetype.Monopropellant || archetype == EngineArchetype.Electric || archetype == EngineArchetype.Bipropellant || archetype == EngineArchetype.Thermodynamic || archetype == EngineArchetype.Advanced || archetype == EngineArchetype.Nuclear)
                         if (!HasFailure(4)) validModes.Add(4);
 
                     if (cachedGimbal != null && !HasFailure(3)) validModes.Add(3);
                 }
 
-                if (validModes.Count > 0) mode = validModes[UnityEngine.Random.Range(0, validModes.Count)];
+                if (validModes.Count > 0)
+                {
+                    // --- VACUUM MODE SHIFT ---
+                    float pressure = (float)vessel.mainBody.GetPressure(vessel.altitude);
+                    if (atmSensitivityIndex > 1.25f && pressure < 0.1f)
+                    {
+                        List<int> weightedPool = new List<int>();
+                        foreach (int m in validModes)
+                        {
+                            int weight = 10;
+                            if (m == 4) weight = 80; // High bias for Thrust Drop
+                            if (m == 2) weight = 1;  // Low bias for Flameout
+                            for (int i = 0; i < weight; i++) weightedPool.Add(m);
+                        }
+                        mode = weightedPool[UnityEngine.Random.Range(0, weightedPool.Count)];
+                    }
+                    else
+                    {
+                        mode = validModes[UnityEngine.Random.Range(0, validModes.Count)];
+                    }
+                }
                 else return; // All systems already failed
             }
 
@@ -1321,7 +1361,10 @@ namespace KerbalEngineDynamics
                     color = "#FFA500";
                     performanceMultiplier = 0.6f; // 40% loss
                     performanceScars++;
-                    for (int i = 0; i < engineModules.Count; i++) { engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; }
+                    for (int i = 0; i < engineModules.Count; i++) 
+                    { 
+                        engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; 
+                    }
                     break;
                 case 5: // Explode
                     msg = "Casing Breach";
