@@ -1,8 +1,14 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
   </PropertyGroup>
+
+  <!-- Exclude the BackgroundThrust source tree (reference only, not compiled by KED) -->
+  <ItemGroup>
+    <Compile Remove="BackgroundThrust-main\**\*.cs" />
+  </ItemGroup>
+
   <ItemGroup>
       <Reference Include="Assembly-CSharp">
         <HintPath>C:\Game\KSP\Kerbal Space beyond lite 4\KSP_x64_Data\Managed\Assembly-CSharp.dll</HintPath>
@@ -14,6 +20,10 @@
       </Reference>
       <Reference Include="UnityEngine.CoreModule">
         <HintPath>C:\Game\KSP\Kerbal Space beyond lite 4\KSP_x64_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+        <Private>False</Private>
+      </Reference>
+      <Reference Include="UnityEngine.PhysicsModule">
+        <HintPath>C:\Game\KSP\Kerbal Space beyond lite 4\KSP_x64_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
         <Private>False</Private>
       </Reference>
     </ItemGroup>

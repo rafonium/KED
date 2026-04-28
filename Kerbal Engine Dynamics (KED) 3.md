@@ -323,7 +323,7 @@ To keep this elegant and persistent across launches, maturity is tracked globall
 *   **Mechanic**: Before attempting a repair, an Engineer can "Run Diagnostics".
 *   **Pre-Failure Effect**:
     *   **Requirement**: Maturity Level 2+ for that specific engine archetype.
-    *   **Insight**: Can reveal if the engine is a **Weak Unit** (hidden Lemon status) before it ever fails.
+    *   **Insight**: Can reveal xif the engine is a **Weak Unit** (hidden Lemon status) before it ever fails.
     *   **Preventative Maintenance**: Once a Weak Unit is identified, an Engineer can perform "Preventative Maintenance". This costs the same as a standard repair (EVA kits) but clears the Lemon flag immediately, preventing the catastrophic failure from occurring.
     *   **SRB Note**: For Solid engines, diagnostics can identify a Weak Unit, but since they are non-repairable, the only action is to abort or stage early (Preventative Maintenance is not available for Solids).
 *   **Post-Failure Effect**:

@@ -32,7 +32,12 @@ namespace KerbalEngineDynamics
         public static bool enableAging = true;
         public static float ignitionFailureBase = 0.01f;
         public static float srbGracePeriod = 10.0f;
+        public static float catalystServiceLimit = 600f;
+        public static float hypergolicFatigueStep = 0.005f;
+        public static float cycleValvesRisk = 0.05f;
+        public static float cycleValvesReveal = 0.5f;
         public static bool debugMode = false;
+        public static Dictionary<string, Dictionary<int, int[]>> archetypeRepairCosts = new Dictionary<string, Dictionary<int, int[]>>();
 
         // Maturity Thresholds
         public static float mono_L1 = 60, mono_L2 = 150, mono_L3 = 300;
@@ -86,6 +91,17 @@ namespace KerbalEngineDynamics
                 if (node.TryGetValue("IgnitionFailureBase", ref ignFailBase)) ignitionFailureBase = ignFailBase / 100f;
 
                 node.TryGetValue("SRBGracePeriod", ref srbGracePeriod);
+                node.TryGetValue("CatalystServiceLimit", ref catalystServiceLimit);
+                
+                float hyperFatigue = 0.5f;
+                if (node.TryGetValue("HypergolicFatigueStep", ref hyperFatigue)) hypergolicFatigueStep = hyperFatigue / 100f;
+                
+                float valveRisk = 5f;
+                if (node.TryGetValue("CycleValvesRisk", ref valveRisk)) cycleValvesRisk = valveRisk / 100f;
+                
+                float valveReveal = 50f;
+                if (node.TryGetValue("CycleValvesReveal", ref valveReveal)) cycleValvesReveal = valveReveal / 100f;
+
                 node.TryGetValue("DebugMode", ref debugMode);
 
                 // Thresholds Loading
@@ -103,8 +119,42 @@ namespace KerbalEngineDynamics
                     if (tNode.HasNode("SOLID")) { var n = tNode.GetNode("SOLID"); n.TryGetValue("L1", ref solid_L1); n.TryGetValue("L2", ref solid_L2); }
                     if (tNode.HasNode("THERMO")) { var n = tNode.GetNode("THERMO"); n.TryGetValue("L1", ref thermo_L1); n.TryGetValue("L2", ref thermo_L2); n.TryGetValue("L3", ref thermo_L3); n.TryGetValue("L4", ref thermo_L4); }
                 }
+
+                if (node.HasNode("REPAIR_CONFIG"))
+                {
+                    ConfigNode rNode = node.GetNode("REPAIR_CONFIG");
+                    foreach (ConfigNode archNode in rNode.nodes)
+                    {
+                        string archName = archNode.name.ToUpper();
+                        var modeCosts = new Dictionary<int, int[]>();
+                        LoadRepairMode(archNode, "IGNITION", 1, modeCosts);
+                        LoadRepairMode(archNode, "FLAMEOUT", 2, modeCosts);
+                        LoadRepairMode(archNode, "GIMBAL", 3, modeCosts);
+                        LoadRepairMode(archNode, "THRUST", 4, modeCosts);
+                        LoadRepairMode(archNode, "MAINTENANCE", 0, modeCosts);
+                        LoadRepairMode(archNode, "DIAGNOSTICS", 5, modeCosts);
+                        LoadRepairMode(archNode, "RETROFIT", 6, modeCosts);
+                        archetypeRepairCosts[archName] = modeCosts;
+                    }
+                }
             }
             initialized = true;
+        }
+
+        private static void LoadRepairMode(ConfigNode node, string name, int mode, Dictionary<int, int[]> dict)
+        {
+            if (node.HasNode(name))
+            {
+                ConfigNode mNode = node.GetNode(name);
+                int[] costs = new int[6] { 5, 5, 5, 5, 5, 5 }; // Defaults
+                mNode.TryGetValue("L0", ref costs[0]);
+                mNode.TryGetValue("L1", ref costs[1]);
+                mNode.TryGetValue("L2", ref costs[2]);
+                mNode.TryGetValue("L3", ref costs[3]);
+                mNode.TryGetValue("L4", ref costs[4]);
+                mNode.TryGetValue("L5", ref costs[5]);
+                dict[mode] = costs;
+            }
         }
     }
 
@@ -143,6 +193,7 @@ namespace KerbalEngineDynamics
         { 
             Instance = this;
             KEDSettings.EnsureInitialized();
+            KEDIntegration.Initialize();
             KEDEvents.OnMaturityGained.Add(AddMaturity);
             GameEvents.onVesselRecovered.Add(OnVesselRecovered);
         }
@@ -279,8 +330,14 @@ namespace KerbalEngineDynamics
         [KSPField(isPersistant = true)] public int failuresCount = 0;
         [KSPField(isPersistant = true)] public bool wasRecovered = false;
         [KSPField(isPersistant = true)] public float performanceMultiplier = 1.0f;
+        [KSPField(isPersistant = true)] public int performanceScars = 0;
+        [KSPField(isPersistant = true)] public int ignitionCount = 0;
         [KSPField(isPersistant = true)] public double srbIgnitionTime = -1.0;
         [KSPField(isPersistant = true)] public float lastCalculatedLemonProb = 0f;
+        [KSPField(isPersistant = true)] public float srbFailureFuelThreshold = -1f;
+        [KSPField(isPersistant = true)] public string investedKitsMask = "0,0,0,0,0,0,0";
+        [KSPField(isPersistant = true)] public string activeFailuresMask = "00000"; // 1=Ign, 2=Flame, 3=Gimbal, 4=Thrust, 5=Explode
+        [KSPField(isPersistant = true)] public double lastKEDUpdateUT = -1.0;
 
         // --- CACHED REFERENCES (NON-PERSISTENT) ---
         private List<ModuleEngines> engineModules = new List<ModuleEngines>();
@@ -318,6 +375,43 @@ namespace KerbalEngineDynamics
 
         [KSPField(isPersistant = true)] public EngineArchetype archetype = EngineArchetype.Thermodynamic;
         private bool lastIgnited = false;
+        public bool IsFailed => HasFailure(1) || HasFailure(2) || HasFailure(3) || HasFailure(4) || HasFailure(5);
+
+        public bool HasFailure(int mode)
+        {
+            if (string.IsNullOrEmpty(activeFailuresMask) || activeFailuresMask.Length < 5) return false;
+            if (mode < 1 || mode > 5) return false;
+            return activeFailuresMask[mode - 1] == '1';
+        }
+
+        private int GetInvestedKits(int mode)
+        {
+            if (string.IsNullOrEmpty(investedKitsMask)) investedKitsMask = "0,0,0,0,0,0,0";
+            string[] split = investedKitsMask.Split(',');
+            if (mode < 0 || mode >= split.Length) return 0;
+            int.TryParse(split[mode], out int val);
+            return val;
+        }
+
+        private void SetInvestedKits(int mode, int amount)
+        {
+            if (string.IsNullOrEmpty(investedKitsMask)) investedKitsMask = "0,0,0,0,0,0,0";
+            string[] split = investedKitsMask.Split(',');
+            if (mode < 0 || mode >= split.Length) return;
+            split[mode] = amount.ToString();
+            investedKitsMask = string.Join(",", split);
+        }
+
+        private void SetFailure(int mode, bool active)
+        {
+            if (string.IsNullOrEmpty(activeFailuresMask) || activeFailuresMask.Length < 5) activeFailuresMask = "00000";
+            if (mode < 1 || mode > 5) return;
+            
+            char[] mask = activeFailuresMask.ToCharArray();
+            mask[mode - 1] = active ? '1' : '0';
+            activeFailuresMask = new string(mask);
+            isFailed = activeFailuresMask.Contains("1");
+        }
 
         private static readonly HashSet<string> HypergolicPropellants = new HashSet<string> { "Aerozine50", "NTO", "MMH", "UDMH", "NitricAcid", "Hydrazine" };
         private static readonly HashSet<string> ElectricPropellants = new HashSet<string> { "XenonGas", "ArgonGas", "LqdArgon", "KryptonGas", "LqdKrypton", "NeonGas", "LqdNeon", "Lithium" };
@@ -362,10 +456,127 @@ namespace KerbalEngineDynamics
                 uiSerialNumber = serialNumber;
                 uiASI = atmSensitivityIndex.ToString("F2");
                 
+                ApplyPerformanceScars();
+
                 if (isFailed) ApplyFailureState(failureMode);
+
+                // --- CATCH-UP MECHANIC ---
+                if (lastKEDUpdateUT > 0)
+                {
+                    double now = Planetarium.GetUniversalTime();
+                    double offlineSeconds = now - lastKEDUpdateUT;
+
+                    // Only process a meaningful gap; BT must be present for engine to have burned offline
+                    if (offlineSeconds > 5.0 && KEDIntegration.HasBT)
+                    {
+                        if (CheckFuelConsumedSinceLastUT())
+                        {
+                            ProcessOfflineBurn(offlineSeconds);
+                        }
+                    }
+                    lastKEDUpdateUT = now;
+                }
             }
             RefreshUI();
             UpdateDebugUI();
+        }
+
+        private bool CheckFuelConsumedSinceLastUT()
+        {
+            // A heuristic gate — if any engine propellant is below 100%, assume BT ran the engine
+            foreach (var e in engineModules)
+            {
+                foreach (var prop in e.propellants)
+                {
+                    var res = part.Resources.Get(prop.id);
+                    if (res != null && res.amount < res.maxAmount) return true;
+                }
+            }
+            return false;
+        }
+
+        private void ProcessOfflineBurn(double burnSeconds)
+        {
+            // 1. Accumulate wear (exact UT-delta)
+            cumulativeBurnSeconds += (float)burnSeconds;
+
+            // 2. Maturity awards (re-evaluated during catch-up)
+            if (!maturityStartAwarded)
+            {
+                maturityStartAwarded = true;
+                KEDEvents.OnMaturityGained.Fire(part.partInfo.name, KEDSettings.startBonus);
+            }
+            if (!maturityBurnAwarded && burnSeconds >= 60.0)
+            {
+                maturityBurnAwarded = true;
+                KEDEvents.OnMaturityGained.Fire(part.partInfo.name, KEDSettings.burnBonus);
+            }
+
+            // 3. Weak Unit deterministic trigger
+            if (isWeakUnit && failureTriggerTime > 0 && cumulativeBurnSeconds >= failureTriggerTime)
+            {
+                TriggerFailure();
+                ScreenMessages.PostScreenMessage(
+                    $"<color=#FF3333>[KED] {part.partInfo.title}: Engine failed during offline burn at T+{cumulativeBurnSeconds:F0}s.</color>",
+                    8f, ScreenMessageStyle.UPPER_CENTER);
+                return;
+            }
+
+            // 4. Monopropellant catalyst exhaustion (binomial-scaled)
+            if (archetype == EngineArchetype.Monopropellant)
+            {
+                float limit = KEDSettings.catalystServiceLimit;
+                if (maturityLevelAtLaunch >= 3) limit *= 2f;
+                if (cumulativeBurnSeconds > limit)
+                {
+                    float overtime = cumulativeBurnSeconds - limit;
+                    float failProbPerSec = (overtime / 10f) * 0.01f * KEDSettings.globalRiskMultiplier;
+                    double p_survival = Math.Pow(1.0 - (double)failProbPerSec, burnSeconds);
+                    if (UnityEngine.Random.value > p_survival) TriggerFailure(4);
+                }
+            }
+
+            // 5. ASI flameout check
+            {
+                float pressure = (float)vessel.mainBody.GetPressure(vessel.altitude);
+                if (atmSensitivityIndex > 1.5f && pressure > 0.5f)
+                {
+                    float flameoutProbPerSec = 0.05f * (atmSensitivityIndex - 1.25f) * KEDSettings.globalRiskMultiplier;
+                    double p_survival = Math.Pow(1.0 - (double)flameoutProbPerSec, burnSeconds);
+                    if (UnityEngine.Random.value > p_survival) TriggerFailure(2);
+                }
+            }
+
+            RefreshUI();
+        }
+
+        private void ApplyPerformanceScars()
+        {
+            if (performanceScars <= 0) return;
+
+            if (archetype == EngineArchetype.Monopropellant)
+            {
+                // ISP Penalty: -2% per scar
+                float penalty = 1.0f - (performanceScars * 0.02f);
+                foreach (var e in engineModules)
+                {
+                    FloatCurve newCurve = new FloatCurve();
+                    foreach (var key in e.atmosphereCurve.Curve.keys)
+                    {
+                        newCurve.Add(key.time, key.value * penalty);
+                    }
+                    e.atmosphereCurve = newCurve;
+                }
+            }
+            else if (archetype == EngineArchetype.Hypergolic)
+            {
+                // Thrust Penalty: -2% per scar
+                performanceMultiplier *= (1.0f - (performanceScars * 0.02f));
+                for (int i = 0; i < engineModules.Count; i++)
+                {
+                    engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier;
+                }
+            }
         }
 
         public void Update()
@@ -378,7 +589,12 @@ namespace KerbalEngineDynamics
                 int seed = 0;
                 if (KEDScenario.Instance.manufacturingSeeds.ContainsKey(part.partInfo.name)) seed = KEDScenario.Instance.manufacturingSeeds[part.partInfo.name];
                 uiDebugRNG = $"Seed: {seed} | P(Lemon): {lastCalculatedLemonProb:P1}";
-                uiDebugArchetype = $"Type: {archetype} | ASI: {atmSensitivityIndex:F2}";
+                
+                string tactInfo = "";
+                if (archetype == EngineArchetype.Monopropellant) tactInfo = $" | Decay: {cumulativeBurnSeconds:F0}s / {KEDSettings.catalystServiceLimit:F0}s";
+                if (archetype == EngineArchetype.Hypergolic) tactInfo = $" | Ignitions: {ignitionCount}";
+
+                uiDebugArchetype = $"Type: {archetype} | ASI: {atmSensitivityIndex:F2} | Scars: {performanceScars}{tactInfo}";
             }
         }
 
@@ -404,10 +620,13 @@ namespace KerbalEngineDynamics
             Events["InstantRepair"].guiActive = show;
             Events["GrantRepairKits"].guiActive = show;
             Events["KillEngine"].guiActive = show;
-            Events["AddMaturityDebug"].guiActive = show;
             Events["AddMaturityDebug"].guiActiveEditor = show;
             Events["ResetMaturityDebug"].guiActive = show;
             Events["ResetMaturityDebug"].guiActiveEditor = show;
+            Events["AddScarDebug"].active = show;
+            Events["ClearScarsDebug"].active = show;
+            Events["AddBurnTimeDebug"].active = (show && archetype == EngineArchetype.Monopropellant);
+            Events["ForceExhaustionDebug"].active = (show && archetype == EngineArchetype.Monopropellant);
             Events["DumpModuleInfo"].guiActive = show;
             Events["DumpModuleInfo"].guiActiveEditor = show;
         }
@@ -523,10 +742,57 @@ namespace KerbalEngineDynamics
             
             float successRate = flightsCount > 0 ? (1f - (float)failuresCount / flightsCount) * 100f : 100f;
             uiHistory = $"Flights: {flightsCount} | Success: {successRate:F0}%";
+            RefreshFaultUI();
         }
 
         public string GetModuleTitle() => $"{part.partInfo.title} ({GetEngineBranding()})";
-        public string GetPrimaryField() => $"Maturity: {GetLevelName(GetMaturityLevel())}";
+        public string GetPrimaryField() => $"Archetype: {archetype}";
+
+        private void RefreshFaultUI()
+        {
+            if (string.IsNullOrEmpty(activeFailuresMask) || activeFailuresMask == "00000") { uiState = "Nominal"; return; }
+
+            List<string> faults = new List<string>();
+            if (HasFailure(1)) faults.Add("Ignition");
+            if (HasFailure(2)) faults.Add("Flameout");
+            if (HasFailure(3)) faults.Add("Gimbal");
+            if (HasFailure(4)) faults.Add("Thrust");
+            if (HasFailure(5)) faults.Add("DESTROYED");
+
+            if (HasFailure(5)) uiState = "DESTROYED";
+            else if (HasFailure(1) || HasFailure(2)) uiState = "FAULT (" + string.Join("+", faults.ToArray()) + ")";
+            else uiState = "DEGRADED (" + string.Join("+", faults.ToArray()) + ")";
+
+            UpdateRepairLabel("RepairIgnition", 1, "Repair: Injectors");
+            UpdateRepairLabel("RepairFlameout", 2, "Repair: Combustion Chamber");
+            UpdateRepairLabel("RepairGimbal", 3, "Repair: Actuators");
+            UpdateRepairLabel("RepairThrust", 4, (archetype == EngineArchetype.Monopropellant || archetype == EngineArchetype.Hypergolic) ? "Valve Flush" : "Repair: Fuel Valves");
+            UpdateRepairLabel("PreventativeMaintenance", 0, "Preventative Maintenance");
+            UpdateRepairLabel("CatalystSwap", 7, "Catalyst Swap");
+            UpdateRepairLabel("NitrogenPurge", 8, "Nitrogen Purge");
+
+            Events["RepairIgnition"].active = HasFailure(1);
+            Events["RepairFlameout"].active = HasFailure(2);
+            Events["RepairGimbal"].active = HasFailure(3);
+            Events["RepairThrust"].active = HasFailure(4);
+
+            Events["CatalystSwap"].active = (archetype == EngineArchetype.Monopropellant && maturityLevelAtLaunch >= 1);
+            Events["NitrogenPurge"].active = (archetype == EngineArchetype.Hypergolic && maturityLevelAtLaunch >= 1);
+            Events["CycleValves"].active = (archetype == EngineArchetype.Hypergolic && maturityLevelAtLaunch >= 1);
+        }
+
+        private void UpdateRepairLabel(string eventName, int mode, string baseName)
+        {
+            int invested = GetInvestedKits(mode);
+            if (invested > 0)
+            {
+                Events[eventName].guiName = $"{baseName} ({invested} kits invested)";
+            }
+            else
+            {
+                Events[eventName].guiName = baseName;
+            }
+        }
 
         private void ApplyHeritageMP()
         {
@@ -555,6 +821,10 @@ namespace KerbalEngineDynamics
 
         private void DetermineArchetype()
         {
+            // Use local find instead of cached list to support prefab calls
+            var engines = part.FindModulesImplementing<ModuleEngines>();
+            if (engines.Count == 0) return;
+
             // 1. Nuclear (EnrichedUranium + non-Uranium propellant)
             if (part.Resources.Contains("EnrichedUranium")) 
             { 
@@ -562,7 +832,7 @@ namespace KerbalEngineDynamics
                 return; 
             }
 
-            ModuleEngines e = engineModules[0];
+            ModuleEngines e = engines[0];
             float vacIsp = e.atmosphereCurve.Evaluate(0f);
 
             // 2. Exotic (ISP > 3000 or specific resources)
@@ -626,9 +896,10 @@ namespace KerbalEngineDynamics
 
         private void CalculateASI()
         {
-            if (engineModules.Count == 0) return;
-            float vac = engineModules[0].atmosphereCurve.Evaluate(0f);
-            float asl = engineModules[0].atmosphereCurve.Evaluate(1f);
+            var engines = part.FindModulesImplementing<ModuleEngines>();
+            if (engines.Count == 0) return;
+            float vac = engines[0].atmosphereCurve.Evaluate(0f);
+            float asl = engines[0].atmosphereCurve.Evaluate(1f);
             atmSensitivityIndex = vac / Mathf.Max(asl, 0.1f);
         }
 
@@ -687,12 +958,23 @@ namespace KerbalEngineDynamics
                 uiBatchHint = "Factory QA: All systems nominal.";
             }
 
-            // SRB Special Trigger: Set failure trigger time based on expected burn
-            if (archetype == EngineArchetype.Solid && isWeakUnit)
+            // Fate Timer Initialization
+            if (isWeakUnit)
             {
-                // We'll use a specific fuel percentage check in FixedUpdate for Solids,
-                // but let's set a flag or time offset to ensure it doesn't trigger in first 10s.
-                failureTriggerTime = KEDSettings.srbGracePeriod + UnityEngine.Random.Range(5f, 60f); // Fallback if fuel check fails
+                if (archetype == EngineArchetype.Solid)
+                {
+                    // SRB Logic: Trigger in 30-60% remaining window (40-70% used)
+                    // Centered at 50% for peak probability
+                    float r1 = UnityEngine.Random.Range(0.3f, 0.6f);
+                    float r2 = UnityEngine.Random.Range(0.3f, 0.6f);
+                    srbFailureFuelThreshold = (r1 + r2) / 2f;
+                    failureTriggerTime = -1; // Use fuel instead of time for SRBs
+                }
+                else
+                {
+                    // 50s Cap: Reveal Lemon early
+                    failureTriggerTime = UnityEngine.Random.Range(15f, 50f);
+                }
             }
 
             // Update lineage seed
@@ -716,7 +998,7 @@ namespace KerbalEngineDynamics
             {
                 int idx = UnityEngine.Random.Range(0, modules.Count);
                 modules[idx].isWeakUnit = true;
-                modules[idx].failureTriggerTime = UnityEngine.Random.Range(15f, 180f); // Failure window
+                modules[idx].failureTriggerTime = UnityEngine.Random.Range(15f, 50f);
                 modules.RemoveAt(idx);
             }
         }
@@ -728,7 +1010,10 @@ namespace KerbalEngineDynamics
                 if (p.partInfo.name == part.partInfo.name)
                 {
                     var m = p.FindModuleImplementing<KEDModule>();
-                    if (m != null) m.failureMode = 4; // Thrust Drop
+                    if (m != null)
+                    {
+                        m.ApplyFailureState(4); // Apply Thrust Drop penalty and UI immediately
+                    }
                 }
             }
         }
@@ -763,6 +1048,23 @@ namespace KerbalEngineDynamics
         {
             if (!HighLogic.LoadedSceneIsFlight || engineModules.Count == 0) return;
 
+            // --- MULTI-FAULT ENFORCEMENT ---
+            if (HasFailure(1) || HasFailure(2))
+            {
+                for (int i = 0; i < engineModules.Count; i++) 
+                { 
+                    engineModules[i].Shutdown(); 
+                    engineModules[i].allowRestart = false; 
+                }
+            }
+
+            if (HasFailure(3) && cachedGimbal != null) { cachedGimbal.gimbalLock = true; }
+
+            if (HasFailure(4))
+            {
+                for (int i = 0; i < engineModules.Count; i++) { engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; }
+            }
+
             bool isBurning = false;
             for (int i = 0; i < engineModules.Count; i++)
             {
@@ -770,10 +1072,26 @@ namespace KerbalEngineDynamics
                 if (e.EngineIgnited && e.currentThrottle > 0.01f && !e.flameout) { isBurning = true; break; }
             }
 
+            // Persistent Thrust: engine may be driving thrust on-rails when vanilla appears off
+            if (!isBurning && KEDIntegration.HasPT)
+            {
+                isBurning = KEDIntegration.IsEngineActivePT(this.part);
+            }
+
+            // Background Thrust: vessel is packed+thrusting or running in background
+            if (!isBurning && KEDIntegration.HasBT)
+            {
+                isBurning = KEDIntegration.IsVesselBurningBT(this.vessel);
+            }
+
+            double now = Planetarium.GetUniversalTime();
+            double deltaT = (lastKEDUpdateUT < 0) ? Time.fixedDeltaTime : now - lastKEDUpdateUT;
+            lastKEDUpdateUT = now;
+
             if (isBurning)
             {
                 if (srbIgnitionTime < 0 && archetype == EngineArchetype.Solid) srbIgnitionTime = Planetarium.GetUniversalTime();
-                cumulativeBurnSeconds += Time.fixedDeltaTime;
+                cumulativeBurnSeconds += (float)deltaT;
                 
                 // Maturity: Engine Start
                 if (!maturityStartAwarded && (vessel.situation == Vessel.Situations.FLYING || vessel.altitude > 100))
@@ -789,7 +1107,7 @@ namespace KerbalEngineDynamics
                     KEDEvents.OnMaturityGained.Fire(part.partInfo.name, KEDSettings.burnBonus);
                 }
 
-                HandleReliabilityLogic();
+                HandleReliabilityLogic(deltaT);
             }
 
             // --- SENSORY CUES (JITTER) REMOVED ---
@@ -807,11 +1125,17 @@ namespace KerbalEngineDynamics
 
         private void OnIgnition()
         {
-            if (isFailed) return;
+            if (HasFailure(1) || HasFailure(2) || HasFailure(5)) return;
 
             // Ignition Fatigue Increment
             float fatigueIncr = KEDSettings.ignitionFailureBase;
             float pressure = (float)vessel.mainBody.GetPressure(vessel.altitude);
+
+            if (archetype == EngineArchetype.Hypergolic)
+            {
+                fatigueIncr = KEDSettings.hypergolicFatigueStep;
+                ignitionCount++;
+            }
 
             // Booster Penalty: High fatigue if starting in vacuum (low pressure)
             if (atmSensitivityIndex < 1.25f && pressure < 0.1f)
@@ -835,9 +1159,9 @@ namespace KerbalEngineDynamics
             }
         }
 
-        private void HandleReliabilityLogic()
+        private void HandleReliabilityLogic(double deltaT)
         {
-            if (isFailed) return;
+            if (HasFailure(5)) return;
 
             // Weak Unit Trigger Window
             if (isWeakUnit && failureTriggerTime > 0)
@@ -848,18 +1172,16 @@ namespace KerbalEngineDynamics
                 }
             }
 
-            // SRB Specific logic: 10s safe, 40-70% fuel window
-            if (archetype == EngineArchetype.Solid && isWeakUnit)
+            // SRB Specific logic: Guaranteed safe for first 10s, then check fuel threshold
+            if (archetype == EngineArchetype.Solid && isWeakUnit && srbFailureFuelThreshold > 0)
             {
                 double timeSinceIgnition = Planetarium.GetUniversalTime() - srbIgnitionTime;
                 if (timeSinceIgnition > (double)KEDSettings.srbGracePeriod && cachedSolidFuel != null)
                 {
                     float fuelPct = (float)(cachedSolidFuel.amount / cachedSolidFuel.maxAmount);
-                    if (fuelPct < 0.6f && fuelPct > 0.3f) // 40% to 70% used = 60% to 30% remaining
+                    if (fuelPct <= srbFailureFuelThreshold)
                     {
-                        // Peak probability at 50% fuel (0.5 remaining)
-                        float prob = 0.01f * (1.0f - Mathf.Abs(fuelPct - 0.5f) * 5f) * KEDSettings.globalRiskMultiplier;
-                        if (UnityEngine.Random.value < prob) TriggerFailure(5); // Explode
+                        TriggerFailure(5); // Explode
                     }
                 }
             }
@@ -871,8 +1193,7 @@ namespace KerbalEngineDynamics
             if (atmSensitivityIndex > 1.25f && pressure < 0.1f)
             {
                 // Reduce failure window probability or delay triggers
-                // (Implementation detail: slightly shift failureTriggerTime forward)
-                if (isWeakUnit) failureTriggerTime += Time.fixedDeltaTime * (atmSensitivityIndex - 1.25f);
+                if (isWeakUnit) failureTriggerTime += deltaT * (atmSensitivityIndex - 1.25f);
             }
 
             // Atmospheric Band Warning in PAW
@@ -887,7 +1208,30 @@ namespace KerbalEngineDynamics
 
             if (atmSensitivityIndex > 1.5f && pressure > 0.5f) // Vacuum engine in thick air
             {
-                if (UnityEngine.Random.value < 0.001f * (atmSensitivityIndex - 1.25f) * KEDSettings.globalRiskMultiplier) TriggerFailure(2); // Flameout
+                float flameoutProbPerSec = 0.05f * (atmSensitivityIndex - 1.25f) * KEDSettings.globalRiskMultiplier;
+                double p_survival = Math.Pow(1.0 - (double)flameoutProbPerSec, deltaT);
+                if (UnityEngine.Random.value > p_survival) TriggerFailure(2); // Flameout
+            }
+
+            // Monopropellant Exhaustion Phase
+            if (archetype == EngineArchetype.Monopropellant)
+            {
+                float limit = KEDSettings.catalystServiceLimit;
+                if (maturityLevelAtLaunch >= 3) limit *= 2f; // Heritage doubles limit
+
+                if (cumulativeBurnSeconds > limit)
+                {
+                    uiState = isFailed ? uiState : "DEGRADED (Catalyst Decay)";
+                    
+                    // Chance of Thrust Drop every 10s past limit
+                    float overtime = cumulativeBurnSeconds - limit;
+                    float failProbPerSec = (overtime / 10f) * 0.01f * KEDSettings.globalRiskMultiplier;
+                    double p_survival = Math.Pow(1.0 - (double)failProbPerSec, deltaT);
+                    if (UnityEngine.Random.value > p_survival)
+                    {
+                        TriggerFailure(4); // Thrust Drop
+                    }
+                }
             }
         }
 
@@ -896,16 +1240,58 @@ namespace KerbalEngineDynamics
             int mode = forcedMode;
             if (mode == 0)
             {
-                if (archetype == EngineArchetype.Solid) mode = 5; // Explode
-                else if (archetype == EngineArchetype.Electric || archetype == EngineArchetype.Nuclear) mode = (maturityLevelAtLaunch >= 1) ? 4 : 2;
-                else mode = UnityEngine.Random.Range(1, 5);
+                List<int> validModes = new List<int>();
+                
+                // Archetype Validation
+                if (archetype == EngineArchetype.Solid) { validModes.Add(5); }
+                else
+                {
+                    // Flameout is universal for liquids/electric/air
+                    if (!HasFailure(2)) validModes.Add(2);
+
+                    if (archetype == EngineArchetype.Bipropellant || archetype == EngineArchetype.Thermodynamic || archetype == EngineArchetype.Advanced || archetype == EngineArchetype.Nuclear)
+                        if (!HasFailure(1)) validModes.Add(1);
+
+                    if (archetype == EngineArchetype.Hypergolic || archetype == EngineArchetype.Monopropellant || archetype == EngineArchetype.Electric || archetype == EngineArchetype.Bipropellant)
+                        if (!HasFailure(4)) validModes.Add(4);
+
+                    if (cachedGimbal != null && !HasFailure(3)) validModes.Add(3);
+                }
+
+                if (validModes.Count > 0) mode = validModes[UnityEngine.Random.Range(0, validModes.Count)];
+                else return; // All systems already failed
             }
+
+            // --- WARP DROP LOGIC ---
+            bool isHardFailure = (mode == 1 || mode == 2 || mode == 5);
+
+            if (isHardFailure && TimeWarp.CurrentRateIndex > 0)
+            {
+                TimeWarp.SetRate(0, true);
+                ScreenMessages.PostScreenMessage(
+                    $"<color=#FF3333>⚠ EMERGENCY WARP DROP: {part.partInfo.title} — Critical Failure!</color>",
+                    6f, ScreenMessageStyle.UPPER_CENTER);
+            }
+            else if (!isHardFailure && TimeWarp.CurrentRateIndex > 0)
+            {
+                // Soft failure during warp — warn but do not interrupt (10s extended duration)
+                ScreenMessages.PostScreenMessage(
+                    $"<color=#FFCC00>⚠ {part.partInfo.title}: Degradation detected during warp.</color>",
+                    10f, ScreenMessageStyle.UPPER_CENTER);
+            }
+
+            // Secondary Failures: If soft fail, set up next timer
+            if (mode == 3 || mode == 4)
+            {
+                failureTriggerTime = cumulativeBurnSeconds + UnityEngine.Random.Range(30f, 100f);
+            }
+
             ApplyFailureState(mode);
         }
 
         private void ApplyFailureState(int mode)
         {
-            isFailed = true;
+            SetFailure(mode, true);
             failureMode = mode;
             failuresCount++;
             string msg = "";
@@ -930,9 +1316,11 @@ namespace KerbalEngineDynamics
                     if (cachedGimbal != null) cachedGimbal.gimbalLock = true;
                     break;
                 case 4: // Thrust Drop
-                    msg = "Thrust Capped";
-                    uiState = "DEGRADED (Valve Seep)";
+                    msg = (archetype == EngineArchetype.Monopropellant) ? "Catalyst Decay" : "Valve Seep";
+                    uiState = (archetype == EngineArchetype.Monopropellant) ? "DEGRADED (Catalyst Decay)" : "DEGRADED (Valve Seep)";
                     color = "#FFA500";
+                    performanceMultiplier = 0.6f; // 40% loss
+                    performanceScars++;
                     for (int i = 0; i < engineModules.Count; i++) { engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; }
                     break;
                 case 5: // Explode
@@ -979,27 +1367,50 @@ namespace KerbalEngineDynamics
             var crew = v.GetVesselCrew()[0];
             if (crew.experienceTrait.Title != "Engineer") { ScreenMessages.PostScreenMessage("Only Engineers can run diagnostics."); return; }
             
-            if (archetype == EngineArchetype.Nuclear && crew.experienceLevel < 3)
-            { ScreenMessages.PostScreenMessage("Nuclear diagnostics require Level 3 Engineer."); return; }
+            int cost = GetKitCost(5, crew.experienceLevel);
+            if (cost < 0) { ScreenMessages.PostScreenMessage($"[KED] {archetype} diagnostics require advanced engineering training."); return; }
 
             diagnosticsRun = true;
             KEDEvents.OnMaturityGained.Fire(part.partInfo.name, 5f); // Inspection Bonus
             string report = isWeakUnit ? "WEAK UNIT DETECTED. Critical failure imminent." : "Core systems nominal.";
-            if (isFailed) report = $"FAILURE IDENTIFIED: {uiState}";
+            if (IsFailed) report = $"MULTIPLE FAULTS IDENTIFIED: {uiState}";
             
             ScreenMessages.PostScreenMessage($"[KED] DIAGNOSTICS ({serialNumber}): {report}", 8f, ScreenMessageStyle.LOWER_CENTER);
-            Events["PreventativeMaintenance"].active = (isWeakUnit && !isFailed);
+            Events["PreventativeMaintenance"].active = (isWeakUnit && !IsFailed);
         }
 
         [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Preventative Maintenance", unfocusedRange = 3f, active = false)]
         public void PreventativeMaintenance()
         {
-            if (ConsumeKits(GetKitCost()))
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null || !v.isEVA) return;
+            var crew = v.GetVesselCrew()[0];
+
+            int totalCost = GetKitCost(0, crew.experienceLevel); // Mode 0 = Maintenance
+            if (totalCost < 0) { ScreenMessages.PostScreenMessage("Engineer experience insufficient for preventative maintenance."); return; }
+
+            int alreadyInvested = GetInvestedKits(0);
+            int needed = totalCost - alreadyInvested;
+
+            int consumed = ConsumeKits(needed);
+            int newTotal = alreadyInvested + consumed;
+            SetInvestedKits(0, newTotal);
+
+            if (newTotal >= totalCost)
             {
+                SetInvestedKits(0, 0);
                 isWeakUnit = false;
+                isLemon = false;
                 failureTriggerTime = -1;
-                ScreenMessages.PostScreenMessage("Preventative Maintenance Complete. Lemon flag cleared.", 5f, ScreenMessageStyle.UPPER_CENTER);
+                srbFailureFuelThreshold = -1f;
+                ScreenMessages.PostScreenMessage("Preventative Maintenance Complete. Unit reliability restored.", 5f, ScreenMessageStyle.UPPER_CENTER);
                 Events["PreventativeMaintenance"].active = false;
+                RefreshUI();
+            }
+            else
+            {
+                ScreenMessages.PostScreenMessage($"[KED] Maintenance in progress: {newTotal}/{totalCost} kits invested.", 5f, ScreenMessageStyle.UPPER_CENTER);
+                RefreshUI();
             }
         }
 
@@ -1008,128 +1419,256 @@ namespace KerbalEngineDynamics
         {
             if (vessel == null || !vessel.isEVA) return;
             var crew = vessel.GetVesselCrew()[0];
-            if (crew.experienceLevel < 2) { ScreenMessages.PostScreenMessage("Requires Level 2 Engineer."); return; }
             
-            if (archetype == EngineArchetype.Nuclear && crew.experienceLevel < 3)
-            { ScreenMessages.PostScreenMessage("Nuclear retrofits require Level 3 Engineer."); return; }
+            int totalCost = GetKitCost(6, crew.experienceLevel);
+            if (totalCost < 0) { ScreenMessages.PostScreenMessage($"[KED] {archetype} retrofits require advanced engineering training."); return; }
 
-            int kits = 5;
-            if (archetype == EngineArchetype.Bipropellant || archetype == EngineArchetype.Airbreathing) kits = 7;
-            if (archetype == EngineArchetype.Nuclear || archetype == EngineArchetype.Electric || archetype == EngineArchetype.Exotic) kits = 10;
+            int alreadyInvested = GetInvestedKits(6);
+            int needed = totalCost - alreadyInvested;
 
-            if (ConsumeKits(kits))
+            int consumed = ConsumeKits(needed);
+            int newTotal = alreadyInvested + consumed;
+            SetInvestedKits(6, newTotal);
+
+            if (newTotal >= totalCost)
             {
+                SetInvestedKits(6, 0);
                 maturityLevelAtLaunch = GetMaturityLevel();
                 ScreenMessages.PostScreenMessage($"Retrofit Complete: Standardized to Level {maturityLevelAtLaunch}", 5f, ScreenMessageStyle.UPPER_CENTER);
                 RefreshUI();
             }
+            else
+            {
+                ScreenMessages.PostScreenMessage($"[KED] Retrofit in progress: {newTotal}/{totalCost} kits invested.", 5f, ScreenMessageStyle.UPPER_CENTER);
+                RefreshUI();
+            }
         }
 
-        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Repair Engine Systems", unfocusedRange = 3f, active = false)]
-        public void RepairEngine()
+        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Repair: Injectors", unfocusedRange = 3f, active = false)]
+        public void RepairIgnition() { ExecuteRepair(1, "Injectors Cleared."); }
+
+        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Repair: Combustion Chamber", unfocusedRange = 3f, active = false)]
+        public void RepairFlameout() { ExecuteRepair(2, "Systems Overhaul Complete."); }
+
+        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Repair: Actuators", unfocusedRange = 3f, active = false)]
+        public void RepairGimbal() { ExecuteRepair(3, "Actuators Reset."); }
+
+        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Repair: Fuel Valves", unfocusedRange = 3f, active = false)]
+        public void RepairThrust() 
+        { 
+            string msg = (archetype == EngineArchetype.Monopropellant) ? "Valves Flushed." : "Nitrogen Purge Complete.";
+            ExecuteRepair(4, msg); 
+        }
+
+        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Catalyst Swap", unfocusedRange = 3f, active = false)]
+        public void CatalystSwap()
         {
             Vessel v = FlightGlobals.ActiveVessel;
             if (v == null || !v.isEVA) return;
             var crew = v.GetVesselCrew()[0];
 
-            if (archetype == EngineArchetype.Nuclear && crew.experienceLevel < 3)
-            { ScreenMessages.PostScreenMessage("Nuclear repairs require Level 3 Engineer."); return; }
-
-            if (ConsumeKits(GetKitCost()))
+            // Requires 1 kit + 5 EC
+            if (part.Resources.Contains("ElectricCharge") && part.Resources["ElectricCharge"].amount < 5.0)
             {
-                isFailed = false;
-                failureMode = 0;
-                uiState = "Nominal";
-                performanceMultiplier = 0.98f; // 2% penalty
-                for (int i = 0; i < engineModules.Count; i++) 
-                { 
-                    engineModules[i].allowRestart = true; 
-                    engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; 
+                ScreenMessages.PostScreenMessage("Insufficient Electric Charge for Catalyst Swap (Needs 5).");
+                return;
+            }
+
+            int consumed = ConsumeKits(1);
+            if (consumed < 1)
+            {
+                ScreenMessages.PostScreenMessage("Insufficient EVA Repair Kits for Catalyst Swap.");
+                return;
+            }
+
+            part.RequestResource("ElectricCharge", 5.0);
+            cumulativeBurnSeconds = 0;
+            if (performanceScars > 0) performanceScars--;
+            isWeakUnit = false;
+            isLemon = false;
+            
+            ApplyPerformanceScars();
+            ScreenMessages.PostScreenMessage("Catalyst Swap Complete. Service life restored.", 5f, ScreenMessageStyle.UPPER_CENTER);
+            RefreshUI();
+        }
+
+        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Nitrogen Purge", unfocusedRange = 3f, active = false)]
+        public void NitrogenPurge()
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null || !v.isEVA) return;
+
+            int consumed = ConsumeKits(1);
+            if (consumed < 1)
+            {
+                ScreenMessages.PostScreenMessage("Insufficient EVA Repair Kits for Nitrogen Purge.");
+                return;
+            }
+
+            ignitionFatigue *= 0.5f;
+            if (performanceScars > 0) performanceScars--;
+            
+            ApplyPerformanceScars();
+            ScreenMessages.PostScreenMessage("Nitrogen Purge & Seal Reseat Complete. Fatigue reduced.", 5f, ScreenMessageStyle.UPPER_CENTER);
+            RefreshUI();
+        }
+
+        [KSPEvent(guiActive = true, guiName = "Cycle Valves", groupName = "KED", active = false)]
+        public void CycleValves()
+        {
+            // Level 1+ Engineers only
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null || !v.isEVA) { ScreenMessages.PostScreenMessage("Only Engineers on EVA can Cycle Valves."); return; }
+            var crew = v.GetVesselCrew()[0];
+            if (crew.experienceLevel < 1) { ScreenMessages.PostScreenMessage("Inexperienced Engineer cannot Cycle Valves safely."); return; }
+
+            // Reveal 50%
+            if (isWeakUnit && UnityEngine.Random.value < KEDSettings.cycleValvesReveal)
+            {
+                ScreenMessages.PostScreenMessage("Valves cycled: Unusual resistance detected. Unit may be faulty.", 6f, ScreenMessageStyle.LOWER_CENTER);
+            }
+            else
+            {
+                ScreenMessages.PostScreenMessage("Valves cycled: Response normal.", 4f, ScreenMessageStyle.LOWER_CENTER);
+            }
+
+            // Risk 5%
+            if (UnityEngine.Random.value < KEDSettings.cycleValvesRisk)
+            {
+                if (UnityEngine.Random.value < 0.5f) TriggerFailure(3); // Gimbal Lock
+                else
+                {
+                    // Sputter
+                    ScreenMessages.PostScreenMessage("WARNING: Inadvertent ignition pulse during test!", 3f, ScreenMessageStyle.UPPER_CENTER);
+                    if (part.Rigidbody != null) 
+                    {
+                        part.Rigidbody.AddForce(-part.transform.up * 50f, ForceMode.Impulse); 
+                    }
                 }
-                KEDEvents.OnMaturityGained.Fire(part.partInfo.name, 10f); // Hard Lesson
-                ScreenMessages.PostScreenMessage("Engine Systems Restored (Degraded).", 5f, ScreenMessageStyle.UPPER_CENTER);
-                Events["RepairEngine"].active = false;
             }
         }
 
-        private bool ConsumeKits(int count)
+        private void ExecuteRepair(int mode, string successMsg)
         {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null || !v.isEVA) return;
+            var crew = v.GetVesselCrew()[0];
+
+            int totalCost = GetKitCost(mode, crew.experienceLevel);
+            if (totalCost < 0) { ScreenMessages.PostScreenMessage("This failure mode is beyond the engineer's repair capability."); return; }
+
+            int alreadyInvested = GetInvestedKits(mode);
+            int needed = totalCost - alreadyInvested;
+
+            int consumed = ConsumeKits(needed);
+            int newTotal = alreadyInvested + consumed;
+            SetInvestedKits(mode, newTotal);
+
+            if (newTotal >= totalCost)
+            {
+                SetInvestedKits(mode, 0);
+                SetFailure(mode, false);
+                isLemon = false; // Successfully repaired unit is no longer a "Lemon"
+                isWeakUnit = false;
+                failureTriggerTime = -1;
+                performanceMultiplier *= 0.98f; // Compounding 2% penalty
+                
+                if (mode == 1 || mode == 2)
+                {
+                    for (int i = 0; i < engineModules.Count; i++) { engineModules[i].allowRestart = true; }
+                }
+                if (mode == 3 && cachedGimbal != null) { cachedGimbal.gimbalLock = false; }
+                if (mode == 4)
+                {
+                    for (int i = 0; i < engineModules.Count; i++) { engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; }
+                }
+
+                KEDEvents.OnMaturityGained.Fire(part.partInfo.name, 10f);
+                ScreenMessages.PostScreenMessage($"[KED] {successMsg}", 5f, ScreenMessageStyle.UPPER_CENTER);
+                RefreshUI();
+            }
+            else
+            {
+                ScreenMessages.PostScreenMessage($"[KED] Repair in progress: {newTotal}/{totalCost} kits invested.", 5f, ScreenMessageStyle.UPPER_CENTER);
+                RefreshUI();
+            }
+        }
+
+        private int ConsumeKits(int count)
+        {
+            if (count <= 0) return 0;
+            int foundTotal = 0;
+            int toRemove = count;
+
             // 1. Check for modern inventory items (KSP 1.11+)
-            int foundItems = 0;
             List<ModuleInventoryPart> inventories = vessel.FindPartModulesImplementing<ModuleInventoryPart>();
             
             foreach (var inv in inventories)
             {
-                foreach (var slot in inv.storedParts.Values)
+                // Copy keys to avoid modification issues during iteration
+                List<int> keys = new List<int>(inv.storedParts.Keys);
+                foreach (int key in keys)
                 {
+                    var slot = inv.storedParts[key];
                     if (slot != null && slot.partName == "evaRepairKit")
                     {
-                        foundItems += slot.quantity;
-                    }
-                }
-            }
-
-            if (foundItems >= count)
-            {
-                int toRemove = count;
-                foreach (var inv in inventories)
-                {
-                    // Copy keys to avoid modification issues during iteration
-                    List<int> keys = new List<int>(inv.storedParts.Keys);
-                    foreach (int key in keys)
-                    {
-                        var slot = inv.storedParts[key];
-                        if (slot != null && slot.partName == "evaRepairKit")
+                        int take = Math.Min(slot.quantity, toRemove);
+                        slot.quantity -= take;
+                        if (slot.quantity <= 0)
                         {
-                            int take = Math.Min(slot.quantity, toRemove);
-                            slot.quantity -= take;
-                            if (slot.quantity <= 0)
-                            {
-                                inv.storedParts.Remove(key);
-                            }
-                            toRemove -= take;
+                            inv.storedParts.Remove(key);
                         }
-                        if (toRemove <= 0) break;
+                        toRemove -= take;
+                        foundTotal += take;
                     }
                     if (toRemove <= 0) break;
                 }
-                return true;
+                if (toRemove <= 0) break;
             }
+
+            if (toRemove <= 0) return foundTotal;
 
             // 2. Fallback for legacy resource-based kits (if any)
-            double foundResource = 0;
             foreach (Part p in vessel.parts)
             {
-                if (p.Resources.Contains("EVARepairKit")) foundResource += p.Resources["EVARepairKit"].amount;
-            }
-
-            if (foundResource >= (double)count)
-            {
-                double toRemove = (double)count;
-                foreach (Part p in vessel.parts)
+                if (p.Resources.Contains("EVARepairKit"))
                 {
-                    if (p.Resources.Contains("EVARepairKit"))
-                    {
-                        double take = Math.Min(p.Resources["EVARepairKit"].amount, toRemove);
-                        p.Resources["EVARepairKit"].amount -= take;
-                        toRemove -= take;
-                    }
-                    if (toRemove <= 0) break;
+                    double take = Math.Min(p.Resources["EVARepairKit"].amount, (double)toRemove);
+                    p.Resources["EVARepairKit"].amount -= take;
+                    toRemove -= (int)take;
+                    foundTotal += (int)take;
                 }
-                return true;
+                if (toRemove <= 0) break;
             }
 
-            ScreenMessages.PostScreenMessage($"Missing {count} EVA Repair Kits!", 5f, ScreenMessageStyle.UPPER_CENTER);
-            return false;
+            return foundTotal;
         }
 
-        private int GetKitCost()
+        private int GetKitCost(int mode, int engineerLevel)
         {
-            int cost = 5;
-            if (archetype == EngineArchetype.Bipropellant || archetype == EngineArchetype.Airbreathing) cost = 7;
-            if (archetype == EngineArchetype.Nuclear || archetype == EngineArchetype.Electric || archetype == EngineArchetype.Exotic) cost = 10;
-            if (diagnosticsRun) cost = Mathf.Max(1, cost - 1);
-            return cost;
+            string arch = archetype.ToString().ToUpper();
+            int lvl = Mathf.Clamp(engineerLevel, 0, 5);
+            
+            // 1. Check specific archetype override
+            if (KEDSettings.archetypeRepairCosts.ContainsKey(arch) && KEDSettings.archetypeRepairCosts[arch].ContainsKey(mode))
+            {
+                int cost = KEDSettings.archetypeRepairCosts[arch][mode][lvl];
+                if (cost < 0) return -1;
+                if (diagnosticsRun && mode != 5 && mode != 6) cost = Mathf.Max(0, cost - 1);
+                return cost;
+            }
+            
+            // 2. Check DEFAULT block
+            if (KEDSettings.archetypeRepairCosts.ContainsKey("DEFAULT") && KEDSettings.archetypeRepairCosts["DEFAULT"].ContainsKey(mode))
+            {
+                int cost = KEDSettings.archetypeRepairCosts["DEFAULT"][mode][lvl];
+                if (cost < 0) return -1;
+                if (diagnosticsRun && mode != 5 && mode != 6) cost = Mathf.Max(0, cost - 1);
+                return cost;
+            }
+
+            // Fallback for missing config
+            return -1; 
         }
 
         // --- DEBUG EVENTS ---
@@ -1167,27 +1706,36 @@ namespace KerbalEngineDynamics
             ScreenMessages.PostScreenMessage("Debug: Fatigue Reset.", 5f, ScreenMessageStyle.UPPER_CENTER);
         }
 
-        [KSPEvent(guiActive = true, guiName = "Cycle Failure", groupName = "KED_Debug")]
+        [KSPEvent(guiActive = true, guiName = "Force Random Failure", groupName = "KED_Debug")]
         public void CycleFailure()
         {
-            int nextMode = (failureMode % 5) + 1;
-            ApplyFailureState(nextMode);
-            ScreenMessages.PostScreenMessage($"Debug: Cycled to Failure Mode {nextMode}.", 5f, ScreenMessageStyle.UPPER_CENTER);
+            TriggerFailure();
+            ScreenMessages.PostScreenMessage("Debug: Forced archetype-appropriate failure.", 5f, ScreenMessageStyle.UPPER_CENTER);
         }
 
         [KSPEvent(guiActive = true, guiName = "Instant Repair", groupName = "KED_Debug")]
         public void InstantRepair()
         {
+            activeFailuresMask = "00000";
             isFailed = false;
+            isLemon = false;
+            isWeakUnit = false;
             failureMode = 0;
+            failureTriggerTime = -1;
             uiState = "Nominal";
             performanceMultiplier = 1.0f;
+            performanceScars = 0;
+
             for (int i = 0; i < engineModules.Count; i++) 
             { 
                 engineModules[i].allowRestart = true; 
                 engineModules[i].maxThrust = prefabMaxThrusts[i]; 
             }
-            ScreenMessages.PostScreenMessage("Debug: Instant Repair Complete.", 5f, ScreenMessageStyle.UPPER_CENTER);
+
+            if (cachedGimbal != null) cachedGimbal.gimbalLock = false;
+
+            ScreenMessages.PostScreenMessage("Debug: Instant Repair Complete. Unit restored to factory specs.", 5f, ScreenMessageStyle.UPPER_CENTER);
+            RefreshUI();
         }
 
         [KSPEvent(guiActive = true, guiName = "Grant Repair Kits", groupName = "KED_Debug")]
@@ -1240,6 +1788,39 @@ namespace KerbalEngineDynamics
             }
         }
 
+        [KSPEvent(guiActive = true, guiName = "Add Performance Scar", groupName = "KED_Debug")]
+        public void AddScarDebug()
+        {
+            performanceScars++;
+            ApplyPerformanceScars();
+            ScreenMessages.PostScreenMessage($"Debug: Added performance scar (Current: {performanceScars})", 5f, ScreenMessageStyle.UPPER_CENTER);
+        }
+
+        [KSPEvent(guiActive = true, guiName = "Clear All Scars", groupName = "KED_Debug")]
+        public void ClearScarsDebug()
+        {
+            performanceScars = 0;
+            performanceMultiplier = 1.0f;
+            // Note: ISP scars on Monoprop require a refresh/re-load or re-applying base ISP
+            ScreenMessages.PostScreenMessage("Debug: Scars cleared. (Performance reset requires scene reload for full effect).", 5f, ScreenMessageStyle.UPPER_CENTER);
+        }
+
+        [KSPEvent(guiActive = true, guiName = "Add 100s Burn Time", groupName = "KED_Debug")]
+        public void AddBurnTimeDebug()
+        {
+            cumulativeBurnSeconds += 100f;
+            ScreenMessages.PostScreenMessage($"Debug: Added 100s burn time (Total: {cumulativeBurnSeconds:F0}s)", 5f, ScreenMessageStyle.UPPER_CENTER);
+        }
+
+        [KSPEvent(guiActive = true, guiName = "Force Exhaustion", groupName = "KED_Debug")]
+        public void ForceExhaustionDebug()
+        {
+            float limit = KEDSettings.catalystServiceLimit;
+            if (maturityLevelAtLaunch >= 3) limit *= 2f;
+            cumulativeBurnSeconds = limit + 1f;
+            ScreenMessages.PostScreenMessage("Debug: Forced Catalyst Exhaustion.", 5f, ScreenMessageStyle.UPPER_CENTER);
+        }
+
         [KSPEvent(guiActive = true, guiActiveEditor = true, guiName = "Dump Module Info", groupName = "KED_Debug")]
         public void DumpModuleInfo()
         {
@@ -1248,7 +1829,7 @@ namespace KerbalEngineDynamics
             log += $"Maturity: {KEDScenario.GetMaturity(part.partInfo.name):F2} MP (Level {GetMaturityLevel()})\n";
             log += $"Batch ID: {batchId} | Lemon: {isLemon} | Weak: {isWeakUnit}\n";
             log += $"Failure: {isFailed} (Mode: {failureMode}) | Clock: {cumulativeBurnSeconds:F2}/{failureTriggerTime:F2}s\n";
-            log += $"Fatigue: {ignitionFatigue:F6} | PerfMod: {performanceMultiplier:F3}\n";
+            log += $"Tactical: Scars={performanceScars} | Ignitions={ignitionCount} | Fatigue={ignitionFatigue:F4}\n";
             log += $"Vessel: {vessel.id} | Situation: {vessel.situation}\n";
             UnityEngine.Debug.Log(log);
             ScreenMessages.PostScreenMessage("Debug: Module Info dumped to KSP Log.", 5f, ScreenMessageStyle.UPPER_CENTER);
@@ -1256,16 +1837,12 @@ namespace KerbalEngineDynamics
 
         public override string GetInfo()
         {
-            int lvl = GetMaturityLevel();
-            float mp = KEDScenario.GetMaturity(part.partInfo.name);
-            string info = $"<color=#00e6e6><b>=== FACTORY SPECIFICATION ===</b></color>\n";
-            info += $"<b>Class: <color=#ffaa00>{GetLevelName(lvl)}</color></b> ({mp:F0} MP)\n";
-            info += $"<b>Archetype: <color=#00ff00>{archetype}</color></b>\n";
-            info += $"<b>ASI: <color=#ffff00>{atmSensitivityIndex:F2}</color></b>\n";
+            DetermineArchetype();
+            CalculateASI();
             
-            if (KEDScenario.Instance != null && KEDScenario.Instance.globalFlightsCount.TryGetValue(part.partInfo.name, out int flights))
-                info += $"<b>Service History: <color=#ffffff>{flights} Flights</color></b>\n";
-
+            string info = $"<color=#00e6e6><b>FACTORY SPECIFICATION</b></color>\n";
+            info += $"<b>Archetype: <color=#00ff00>{archetype}</color></b>\n";
+            
             info += $"\n<i>Place in workspace for Live Telemetry.</i>";
             return info;
         }
