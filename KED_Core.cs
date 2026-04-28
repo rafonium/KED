@@ -350,7 +350,7 @@ namespace KerbalEngineDynamics
         // --- UI ---
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "S/N", groupName = "KED", groupDisplayName = "RELIABILITY REPORT")]
         public string uiSerialNumber = "";
-        [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Maturity", groupName = "KED")]
+        [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Mastery Level", groupName = "KED")]
         public string uiMaturity = "";
         [KSPField(guiActive = true, guiName = "State", groupName = "KED")]
         public string uiState = "Nominal";
@@ -752,20 +752,13 @@ namespace KerbalEngineDynamics
             }
         }
 
-        private string GetEngineBranding()
-        {
-            int lvl = GetMaturityLevel();
-            if (lvl >= 3) return "Heritage Line";
-            if (lvl >= 2) return "Block II";
-            if (lvl >= 1) return "Block I";
-            return "Prototype";
-        }
+
 
         private void RefreshUI()
         {
             float mp = KEDScenario.GetMaturity(part.partInfo.name);
             int lvl = GetMaturityLevel();
-            uiMaturity = $"{GetLevelName(lvl)} ({mp:F0} MP)";
+            uiMaturity = $"Level {lvl} ({GetLevelName(lvl)})";
             uiSerialNumber = serialNumber;
             
             float successRate = flightsCount > 0 ? (1f - (float)failuresCount / flightsCount) * 100f : 100f;
@@ -774,7 +767,7 @@ namespace KerbalEngineDynamics
             RefreshFaultUI();
         }
 
-        public string GetModuleTitle() => $"{part.partInfo.title} ({GetEngineBranding()})";
+        public string GetModuleTitle() => "Kerbal Engine Dynamics";
         public string GetPrimaryField() => $"Archetype: {archetype}";
 
         private void RefreshFaultUI()
@@ -2040,8 +2033,8 @@ namespace KerbalEngineDynamics
             CalculateASI();
             
             string info = $"<color=#00e6e6><b>FACTORY SPECIFICATION</b></color>\n";
-            info += $"<b>Archetype: <color=#00ff00>{archetype}</color></b>\n";
-            
+            info += $"Archetype: {archetype}\n";
+            info += $"ASI: {atmSensitivityIndex:F2}\n";
             info += $"\n<i>Place in workspace for Live Telemetry.</i>";
             return info;
         }
