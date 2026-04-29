@@ -30,12 +30,14 @@ namespace KerbalEngineDynamics
         public static float agingFactorInc = 0.001f;
         public static int agingFlightThreshold = 50;
         public static bool enableAging = true;
+        public static bool enableCryoSpinUp = true;
         public static float ignitionFailureBase = 0.01f;
         public static float srbGracePeriod = 10.0f;
         public static float catalystServiceLimit = 600f;
         public static float hypergolicFatigueStep = 0.005f;
         public static float cycleValvesRisk = 0.05f;
         public static float cycleValvesReveal = 0.5f;
+        public static float cryoSpinDownGrace = 1.5f;
         public static bool debugMode = false;
         public static Dictionary<string, Dictionary<int, int[]>> archetypeRepairCosts = new Dictionary<string, Dictionary<int, int[]>>();
 
@@ -86,6 +88,7 @@ namespace KerbalEngineDynamics
 
                 node.TryGetValue("AgingThreshold", ref agingFlightThreshold);
                 node.TryGetValue("EnableAging", ref enableAging);
+                node.TryGetValue("EnableCryoSpinUp", ref enableCryoSpinUp);
 
                 float ignFailBase = 1f;
                 if (node.TryGetValue("IgnitionFailureBase", ref ignFailBase)) ignitionFailureBase = ignFailBase / 100f;
@@ -101,6 +104,8 @@ namespace KerbalEngineDynamics
                 
                 float valveReveal = 50f;
                 if (node.TryGetValue("CycleValvesReveal", ref valveReveal)) cycleValvesReveal = valveReveal / 100f;
+
+                node.TryGetValue("CryoSpinDownGrace", ref cryoSpinDownGrace);
 
                 node.TryGetValue("DebugMode", ref debugMode);
 
@@ -342,6 +347,8 @@ namespace KerbalEngineDynamics
         [KSPField(isPersistant = true)] public string activeFailuresMask = "0,0,0,0,0"; // Fix: Use commas to match parser
         [KSPField(isPersistant = true)] public double lastKEDUpdateUT = -1.0;
         [KSPField(isPersistant = true)] public double lastKnownFuelMass = -1.0;
+        [KSPField(isPersistant = true)] public double turbineShutdownUT = -1.0;
+        [KSPField(isPersistant = true)] public bool hasManualPrime = false;
 
         // --- CACHED REFERENCES (NON-PERSISTENT) ---
         private List<ModuleEngines> engineModules = new List<ModuleEngines>();
@@ -351,6 +358,8 @@ namespace KerbalEngineDynamics
         private List<FloatCurve> prefabAtmosphereCurves = new List<FloatCurve>();
         private float prefabGimbalRange = 0f;
         private bool isCascadeVictim = false;
+        private bool isBurning = false;
+        private bool lastFrameBurning = false;
 
         // --- UI ---
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Part S/N", groupName = "KED", groupDisplayName = "ENGINE TELEMETRY")]
@@ -367,6 +376,10 @@ namespace KerbalEngineDynamics
         public string uiHistory = "";
         [KSPField(guiActive = true, guiName = "Yield", groupName = "KED")]
         public string uiPerformance = "100%";
+        [KSPField(guiActive = true, guiName = "Turbine", groupName = "KED")]
+        public string uiTurbineStatus = "Ready";
+        [KSPField(guiActive = true, guiName = "Spin-up Req", groupName = "KED")]
+        public string uiLN2Req = "0 units";
 
         // --- DEBUG UI ---
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "State", groupName = "KED_Debug", groupDisplayName = "DEBUG: ENGINE CONTROL")]
@@ -557,6 +570,7 @@ namespace KerbalEngineDynamics
 
         private void ProcessOfflineBurn(double burnSeconds)
         {
+            float pressure = (float)vessel.mainBody.GetPressure(vessel.altitude);
             // 1. Accumulate wear (exact UT-delta)
             cumulativeBurnSeconds += (float)burnSeconds;
 
@@ -622,14 +636,16 @@ namespace KerbalEngineDynamics
                 }
             }
 
-            // 5. ASI flameout check
+            // 5. ASI Flow Separation Check
+            if (atmSensitivityIndex > 1.5f && pressure > 0.5f && archetype != EngineArchetype.Nuclear && archetype != EngineArchetype.Electric && archetype != EngineArchetype.Exotic) 
             {
-                float pressure = (float)vessel.mainBody.GetPressure(vessel.altitude);
-                if (atmSensitivityIndex > 1.5f && pressure > 0.5f)
+                float severity = (atmSensitivityIndex - 1.25f) * pressure;
+                float damageProbPerSec = 0.05f * severity * KEDSettings.globalRiskMultiplier;
+                double p_survival = Math.Pow(1.0 - (double)damageProbPerSec, burnSeconds);
+                
+                if (UnityEngine.Random.value > p_survival) 
                 {
-                    float flameoutProbPerSec = 0.05f * (atmSensitivityIndex - 1.25f) * KEDSettings.globalRiskMultiplier;
-                    double p_survival = Math.Pow(1.0 - (double)flameoutProbPerSec, burnSeconds);
-                    if (UnityEngine.Random.value > p_survival) TriggerFailure(2);
+                    TriggerFailure(UnityEngine.Random.value > 0.5f ? 2 : 3); 
                 }
             }
 
@@ -728,6 +744,30 @@ namespace KerbalEngineDynamics
                     uiDebugUnitStatus = isWeakUnit ? "<color=#FF3333>WEAK UNIT</color>" : "<color=#00FF00>NOMINAL UNIT</color>";
                 }
             }
+
+            // --- TURBINE DYNAMIC UI ---
+            if (KEDSettings.enableCryoSpinUp && archetype == EngineArchetype.Bipropellant && engineModules.Count > 0)
+            {
+                float currentThrust = engineModules[0].maxThrust;
+                float maturityMod = (GetMaturityLevel() >= 3) ? 0.8f : (GetMaturityLevel() >= 1 ? 1.0f : 1.2f);
+                float pAtm = 0f;
+
+                if (HighLogic.LoadedSceneIsFlight)
+                {
+                    pAtm = (float)vessel.mainBody.GetPressure(vessel.altitude) / 101.325f;
+                    
+                    if (isBurning) uiTurbineStatus = "<color=#00FF00>Active</color>";
+                    else if (Planetarium.GetUniversalTime() - turbineShutdownUT < KEDSettings.cryoSpinDownGrace) uiTurbineStatus = "<color=#FFFF00>Spin-down</color>";
+                    else uiTurbineStatus = "Ready";
+                }
+                else if (HighLogic.LoadedSceneIsEditor)
+                {
+                    pAtm = 0f; 
+                }
+
+                double ln2Cost = (currentThrust / 100f) * (1f + pAtm) * maturityMod;
+                uiLN2Req = hasManualPrime ? "0.0 units (Primed)" : $"{ln2Cost:F2} units";
+            }
         }
 
         private void UpdateDebugUI()
@@ -769,6 +809,8 @@ namespace KerbalEngineDynamics
             Events["ForceExhaustionDebug"].active = (show && archetype == EngineArchetype.Monopropellant);
             Events["DumpModuleInfo"].guiActive = show;
             Events["DumpModuleInfo"].guiActiveEditor = show;
+            Events["ToggleCryoSpinUp"].guiActive = show;
+            Events["ToggleCryoSpinUp"].guiActiveEditor = show;
         }
 
         private string GetLevelName(int lvl)
@@ -882,6 +924,10 @@ namespace KerbalEngineDynamics
             Fields["uiBatchHint"].guiActiveEditor = true;
             Fields["uiASI"].guiActive = false;
             Fields["uiASI"].guiActiveEditor = false;
+
+            bool showCryo = KEDSettings.enableCryoSpinUp && archetype == EngineArchetype.Bipropellant && (prefabMaxThrusts.Count > 0 && prefabMaxThrusts[0] >= 100f);
+            Fields["uiTurbineStatus"].guiActive = showCryo;
+            Fields["uiLN2Req"].guiActive = showCryo;
 
             RefreshFaultUI();
         }
@@ -1275,7 +1321,7 @@ namespace KerbalEngineDynamics
                 for (int i = 0; i < engineModules.Count; i++) { engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; }
             }
 
-            bool isBurning = false;
+            isBurning = false;
             for (int i = 0; i < engineModules.Count; i++)
             {
                 var e = engineModules[i];
@@ -1303,6 +1349,41 @@ namespace KerbalEngineDynamics
             {
                 lastKnownFuelMass = GetVesselPropellantMass();
             }
+
+            // --- TURBINE STATE MACHINE ---
+            if (KEDSettings.enableCryoSpinUp && archetype == EngineArchetype.Bipropellant && engineModules.Count > 0)
+            {
+                // Startup Event (Rising Edge)
+                if (isBurning && !lastFrameBurning)
+                {
+                    bool gracePeriod = (Planetarium.GetUniversalTime() - turbineShutdownUT < KEDSettings.cryoSpinDownGrace);
+                    if (!gracePeriod && !hasManualPrime)
+                    {
+                        float currentThrust = engineModules[0].maxThrust;
+                        float pAtm = (float)vessel.mainBody.GetPressure(vessel.altitude) / 101.325f;
+                        float maturityMod = (GetMaturityLevel() >= 3) ? 0.8f : (GetMaturityLevel() >= 1 ? 1.0f : 1.2f);
+                        
+                        double ln2Cost = (currentThrust / 100f) * (1f + pAtm) * maturityMod;
+                        double amountTaken = part.RequestResource("LqdNitrogen", ln2Cost);
+                        
+                        if (amountTaken < ln2Cost * 0.99) 
+                        {
+                            isBurning = false;
+                            foreach (var e in engineModules) e.Shutdown();
+                            ignitionFatigue += 0.05f;
+                            ScreenMessages.PostScreenMessage($"<color=#FF3333>Ignition Aborted: Insufficient LN2 for turbopump spin-up ({amountTaken:F1}/{ln2Cost:F1})</color>", 5f, ScreenMessageStyle.UPPER_CENTER);
+                        }
+                    }
+                    if (hasManualPrime && !gracePeriod) hasManualPrime = false;
+                }
+
+                // Shutdown Event (Falling Edge)
+                if (!isBurning && lastFrameBurning)
+                {
+                    turbineShutdownUT = Planetarium.GetUniversalTime();
+                }
+            }
+            lastFrameBurning = isBurning;
 
             if (isBurning)
             {
@@ -1353,11 +1434,6 @@ namespace KerbalEngineDynamics
                 ignitionCount++;
             }
 
-            // Booster Penalty: High fatigue if starting in vacuum (low pressure)
-            if (atmSensitivityIndex < 1.25f && pressure < 0.1f)
-            {
-                fatigueIncr *= 10f * (1.25f - atmSensitivityIndex);
-            }
 
             ignitionFatigue += fatigueIncr;
 
@@ -1415,21 +1491,29 @@ namespace KerbalEngineDynamics
                 // Now handled via weighted failure modes in TriggerFailure()
             }
 
-            // Atmospheric Band Warning in PAW
-            if ((atmSensitivityIndex > 1.5f && pressure > 0.5f) || (atmSensitivityIndex < 1.15f && pressure < 0.1f))
+            // Flow Separation Warning in PAW (Vacuum nozzle in thick atmosphere)
+            if (atmSensitivityIndex > 1.5f && pressure > 0.5f)
             {
-                uiState = isFailed ? uiState : "Outside Optimal Band";
+                uiState = isFailed ? uiState : "DANGER: Flow Separation Risk";
             }
-            else if (!isFailed && uiState == "Outside Optimal Band")
+            else if (!isFailed && (uiState == "DANGER: Flow Separation Risk" || uiState == "Outside Optimal Band"))
             {
                 uiState = "Nominal";
             }
 
-            if (atmSensitivityIndex > 1.5f && pressure > 0.5f && archetype != EngineArchetype.Nuclear && archetype != EngineArchetype.Electric && archetype != EngineArchetype.Exotic) // Vacuum engine in thick air
+            if (atmSensitivityIndex > 1.5f && pressure > 0.5f && archetype != EngineArchetype.Nuclear && archetype != EngineArchetype.Electric && archetype != EngineArchetype.Exotic) 
             {
-                float flameoutProbPerSec = 0.05f * (atmSensitivityIndex - 1.25f) * KEDSettings.globalRiskMultiplier;
-                double p_survival = Math.Pow(1.0 - (double)flameoutProbPerSec, deltaT);
-                if (UnityEngine.Random.value > p_survival) TriggerFailure(2); // Flameout
+                // Severe vibration from flow separation (Mach disks) damages the engine structure
+                float severity = (atmSensitivityIndex - 1.25f) * pressure;
+                float damageProbPerSec = 0.05f * severity * KEDSettings.globalRiskMultiplier;
+                double p_survival = Math.Pow(1.0 - (double)damageProbPerSec, deltaT);
+                
+                if (UnityEngine.Random.value > p_survival) 
+                {
+                    // 50% chance the shockwaves blow out the combustion (Flameout)
+                    // 50% chance the asymmetrical vibration seizes the actuators (Gimbal Lock)
+                    TriggerFailure(UnityEngine.Random.value > 0.5f ? 2 : 3); 
+                }
             }
 
             // Monopropellant Exhaustion Phase
@@ -1799,6 +1883,26 @@ namespace KerbalEngineDynamics
             
             ApplyPerformanceScars();
             ScreenMessages.PostScreenMessage("Nitrogen Purge & Seal Reseat Complete. Fatigue reduced.", 5f, ScreenMessageStyle.UPPER_CENTER);
+            RefreshUI();
+        }
+
+        [KSPEvent(guiActiveUnfocused = true, externalToEVAOnly = true, guiName = "Manual Turbine Prime", unfocusedRange = 3f)]
+        public void ManualTurbinePrime()
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null || !v.isEVA) return;
+            var crew = v.GetVesselCrew()[0];
+            if (crew.experienceTrait.Title != "Engineer") { ScreenMessages.PostScreenMessage("Only Engineers can manually prime the turbine."); return; }
+
+            int consumed = ConsumeKits(1, v);
+            if (consumed < 1)
+            {
+                ScreenMessages.PostScreenMessage("Insufficient EVA Repair Kits for Turbine Priming.");
+                return;
+            }
+
+            hasManualPrime = true;
+            ScreenMessages.PostScreenMessage("Turbine Primed Manually. Next start is free.", 5f, ScreenMessageStyle.UPPER_CENTER);
             RefreshUI();
         }
 
@@ -2172,10 +2276,32 @@ namespace KerbalEngineDynamics
             ScreenMessages.PostScreenMessage("Debug: Module Info dumped to KSP Log.", 5f, ScreenMessageStyle.UPPER_CENTER);
         }
 
+        [KSPEvent(guiActive = true, guiActiveEditor = true, guiName = "Toggle Cryo Spin-up", groupName = "KED_Debug")]
+        public void ToggleCryoSpinUp()
+        {
+            KEDSettings.enableCryoSpinUp = !KEDSettings.enableCryoSpinUp;
+            ScreenMessages.PostScreenMessage($"Debug: Cryogenic Spin-up {(KEDSettings.enableCryoSpinUp ? "ENABLED" : "DISABLED")}", 5f, ScreenMessageStyle.UPPER_CENTER);
+            RefreshUI();
+        }
+
         public override string GetInfo()
         {
             DetermineArchetype();
-            return $"<color=#00e6e6><b>KED SPECIFICATION</b></color>\nArchetype: {archetype}";
+            string info = $"<color=#00e6e6><b>KED SPECIFICATION</b></color>\nArchetype: {archetype}";
+
+            // Add Cryo Spin-up baseline to tooltip
+            if (KEDSettings.enableCryoSpinUp && archetype == EngineArchetype.Bipropellant)
+            {
+                var prefabEngine = part.partInfo.partPrefab.FindModuleImplementing<ModuleEngines>();
+                if (prefabEngine != null)
+                {
+                    // Base calculation: vacuum (P=0), level 0 maturity (Mod=1.2)
+                    double baseLn2 = (prefabEngine.maxThrust / 100f) * 1.0f * 1.2f; 
+                    info += $"\n<color=#66ff66>Base Spin-up:</color> {baseLn2:F1} LN2";
+                }
+            }
+            
+            return info;
         }
 
         public Callback<Rect> GetDrawModulePanelCallback() => null;
