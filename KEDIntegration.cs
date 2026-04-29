@@ -129,16 +129,18 @@ namespace KerbalEngineDynamics
             if (!HasBT || vessel == null) return false;
 
             // 1. Preferred path: query BackgroundThrustVessel.Active on the VesselModule
-            if (_btVesselModuleType != null && _btActiveProperty != null)
+            VesselModule vesselModule = null;
+            if (_btVesselModuleType != null)
+            {
+                vesselModule = FindVesselModule(vessel, _btVesselModuleType);
+            }
+
+            if (vesselModule != null && _btActiveProperty != null)
             {
                 try
                 {
-                    VesselModule vesselModule = FindVesselModule(vessel, _btVesselModuleType);
-                    if (vesselModule != null)
-                    {
-                        object active = _btActiveProperty.GetValue(vesselModule);
-                        if (active is bool b) return b;
-                    }
+                    object active = _btActiveProperty.GetValue(vesselModule);
+                    if (active is bool b) return b;
                 }
                 catch { /* fall through to part-level check */ }
             }
@@ -156,15 +158,11 @@ namespace KerbalEngineDynamics
                         object enabled = _btIsEnabledField.GetValue(btMod);
                         if (enabled is bool isEnabled && isEnabled)
                         {
-                            // Throttle check via VesselModule
-                            if (_btVesselModuleType != null && _btThrottleProperty != null)
+                            // Throttle check via VesselModule (using the cached module)
+                            if (vesselModule != null && _btThrottleProperty != null)
                             {
-                                VesselModule vesselModule = FindVesselModule(vessel, _btVesselModuleType);
-                                if (vesselModule != null)
-                                {
-                                    object throttle = _btThrottleProperty.GetValue(vesselModule);
-                                    if (throttle is double d && d > 0.01) return true;
-                                }
+                                object throttle = _btThrottleProperty.GetValue(vesselModule);
+                                if (throttle is double d && d > 0.01) return true;
                             }
                             else
                             {
