@@ -39,6 +39,11 @@ namespace KerbalEngineDynamics
         public static float cycleValvesReveal = 0.5f;
         public static float cryoSpinDownGrace = 1.5f;
         public static bool debugMode = false;
+        public static float batchLemonProbScale = 0.0167f;
+        public static float vacuumReliabilityBonus = 0.1f;
+        public static float asiFlameoutThreshold = 1.5f;
+        public static float asiWarningThreshold = 1.25f;
+        public static float asiPressureThreshold = 0.5f;
         public static Dictionary<string, Dictionary<int, int[]>> archetypeRepairCosts = new Dictionary<string, Dictionary<int, int[]>>();
 
         // Maturity Thresholds
@@ -106,6 +111,16 @@ namespace KerbalEngineDynamics
                 if (node.TryGetValue("CycleValvesReveal", ref valveReveal)) cycleValvesReveal = valveReveal / 100f;
 
                 node.TryGetValue("CryoSpinDownGrace", ref cryoSpinDownGrace);
+
+                float batchScale = 1.67f;
+                if (node.TryGetValue("BatchLemonProbScale", ref batchScale)) batchLemonProbScale = batchScale / 100f;
+
+                float vacBonus = 10f;
+                if (node.TryGetValue("VacuumReliabilityBonus", ref vacBonus)) vacuumReliabilityBonus = vacBonus / 100f;
+
+                node.TryGetValue("ASI_FlameoutThreshold", ref asiFlameoutThreshold);
+                node.TryGetValue("ASI_WarningThreshold", ref asiWarningThreshold);
+                node.TryGetValue("ASI_PressureThreshold", ref asiPressureThreshold);
 
                 node.TryGetValue("DebugMode", ref debugMode);
 
@@ -240,6 +255,7 @@ namespace KerbalEngineDynamics
 
         public void Update()
         {
+            if (Time.frameCount % 20 != 0) return;
             if (messageQueue.Count > 0 && Time.time - lastMessageTime > 1.5f)
             {
                 var msg = messageQueue.Dequeue();
@@ -349,6 +365,12 @@ namespace KerbalEngineDynamics
         [KSPField(isPersistant = true)] public double lastKnownFuelMass = -1.0;
         [KSPField(isPersistant = true)] public double turbineShutdownUT = -1.0;
         [KSPField(isPersistant = true)] public bool hasManualPrime = false;
+        [KSPField(isPersistant = true)] public double pendingLN2Debt = 0;
+
+        // --- INTERNAL OPTIMIZED STATE ---
+        private int[] _activeFailures = new int[5];
+        private int[] _investedKits = new int[9];
+        private VesselModule _cachedBTVesselModule;
 
         // --- CACHED REFERENCES (NON-PERSISTENT) ---
         private List<ModuleEngines> engineModules = new List<ModuleEngines>();
@@ -378,7 +400,7 @@ namespace KerbalEngineDynamics
         public string uiPerformance = "100%";
         [KSPField(guiActive = true, guiName = "Turbine", groupName = "KED")]
         public string uiTurbineStatus = "Ready";
-        [KSPField(guiActive = true, guiName = "Spin-up Req", groupName = "KED")]
+        [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Spin-up Req", groupName = "KED")]
         public string uiLN2Req = "0 units";
 
         // --- DEBUG UI ---
@@ -405,66 +427,60 @@ namespace KerbalEngineDynamics
         private bool lastIgnited = false;
         public bool IsFailed => HasFailure(1) || HasFailure(2) || HasFailure(3) || HasFailure(4) || HasFailure(5);
 
+        private void SyncMasksToArrays()
+        {
+            if (_activeFailures == null) _activeFailures = new int[5];
+            string[] fSplit = (activeFailuresMask ?? "0,0,0,0,0").Split(',');
+            for (int i = 0; i < _activeFailures.Length; i++)
+            {
+                if (i < fSplit.Length && int.TryParse(fSplit[i], out int val)) _activeFailures[i] = val;
+                else _activeFailures[i] = 0;
+            }
+
+            if (_investedKits == null) _investedKits = new int[9];
+            string[] kSplit = (investedKitsMask ?? "0,0,0,0,0,0,0").Split(',');
+            for (int i = 0; i < _investedKits.Length; i++)
+            {
+                if (i < kSplit.Length && int.TryParse(kSplit[i], out int val)) _investedKits[i] = val;
+                else _investedKits[i] = 0;
+            }
+        }
+
+        private void SyncArraysToMasks()
+        {
+            activeFailuresMask = string.Join(",", System.Array.ConvertAll(_activeFailures, x => x.ToString()));
+            investedKitsMask = string.Join(",", System.Array.ConvertAll(_investedKits, x => x.ToString()));
+        }
+
         public int GetFailureCount(int mode)
         {
-            if (string.IsNullOrEmpty(activeFailuresMask)) activeFailuresMask = "0,0,0,0,0";
-            string[] split = activeFailuresMask.Split(',');
             if (mode < 1 || mode > 5) return 0;
-            // Ensure split is long enough to prevent IndexOutOfRangeException
-            if (split.Length < 5) 
-            {
-                activeFailuresMask = "0,0,0,0,0";
-                return 0;
-            }
-            int.TryParse(split[mode - 1], out int val);
-            return val;
+            return _activeFailures[mode - 1];
         }
 
         public bool HasFailure(int mode) => GetFailureCount(mode) > 0;
 
         private int GetInvestedKits(int mode)
         {
-            if (string.IsNullOrEmpty(investedKitsMask)) investedKitsMask = "0,0,0,0,0,0,0";
-            string[] split = investedKitsMask.Split(',');
-            if (mode < 0 || mode >= split.Length) return 0;
-            int.TryParse(split[mode], out int val);
-            return val;
+            if (mode < 0 || mode >= _investedKits.Length) return 0;
+            return _investedKits[mode];
         }
 
         private void SetInvestedKits(int mode, int amount)
         {
-            if (string.IsNullOrEmpty(investedKitsMask)) investedKitsMask = "0,0,0,0,0,0,0";
-            string[] split = investedKitsMask.Split(',');
-            if (mode < 0 || mode >= split.Length) return;
-            split[mode] = amount.ToString();
-            investedKitsMask = string.Join(",", split);
+            if (mode < 0 || mode >= _investedKits.Length) return;
+            _investedKits[mode] = amount;
+            SyncArraysToMasks();
         }
 
         private void SetFailure(int mode, bool active)
         {
-            if (string.IsNullOrEmpty(activeFailuresMask)) activeFailuresMask = "0,0,0,0,0";
-            string[] split = activeFailuresMask.Split(',');
             if (mode < 1 || mode > 5) return;
-            
-            // Fix: Enforce array length before access
-            if (split.Length < 5)
-            {
-                string[] newSplit = new string[5] { "0", "0", "0", "0", "0" };
-                for (int i = 0; i < Math.Min(split.Length, 5); i++) newSplit[i] = split[i];
-                split = newSplit;
-            }
-
-            int val = 0;
-            int.TryParse(split[mode - 1], out val);
-            
-            if (active) val++;
-            else val = Mathf.Max(0, val - 1);
-            
-            split[mode - 1] = val.ToString();
-            activeFailuresMask = string.Join(",", split);
-            
+            if (active) _activeFailures[mode - 1]++;
+            else _activeFailures[mode - 1] = UnityEngine.Mathf.Max(0, _activeFailures[mode - 1] - 1);
+            SyncArraysToMasks();
             isFailed = false;
-            for (int i = 0; i < split.Length; i++) if (split[i] != "0") { isFailed = true; break; }
+            for (int i = 0; i < _activeFailures.Length; i++) if (_activeFailures[i] != 0) { isFailed = true; break; }
         }
 
         private static readonly HashSet<string> HypergolicPropellants = new HashSet<string> { "Aerozine50", "NTO", "MMH", "UDMH", "NitricAcid", "Hydrazine" };
@@ -472,6 +488,8 @@ namespace KerbalEngineDynamics
 
         public override void OnStart(StartState state)
         {
+            SyncMasksToArrays();
+            if (KEDIntegration.HasBT && vessel != null) _cachedBTVesselModule = KEDIntegration.FindVesselModule(vessel, KEDIntegration.GetBTVesselModuleType());
             engineModules = part.FindModulesImplementing<ModuleEngines>();
             if (engineModules.Count == 0) return;
 
@@ -575,15 +593,13 @@ namespace KerbalEngineDynamics
             cumulativeBurnSeconds += (float)burnSeconds;
 
             // 2. Maturity awards (re-evaluated during catch-up)
-            if (!maturityStartAwarded)
+            if (!maturityStartAwarded && (vessel.situation == Vessel.Situations.FLYING || vessel.altitude > 100))
             {
-                maturityStartAwarded = true;
-                KEDEvents.OnMaturityGained.Fire(part.partInfo.name, KEDSettings.startBonus);
+                AwardVesselMaturity(KEDSettings.startBonus, true);
             }
             if (!maturityBurnAwarded && burnSeconds >= 60.0)
             {
-                maturityBurnAwarded = true;
-                KEDEvents.OnMaturityGained.Fire(part.partInfo.name, KEDSettings.burnBonus);
+                AwardVesselMaturity(KEDSettings.burnBonus, false);
             }
 
             // 3. Weak Unit deterministic trigger
@@ -637,7 +653,7 @@ namespace KerbalEngineDynamics
             }
 
             // 5. ASI Flow Separation Check
-            if (atmSensitivityIndex > 1.5f && pressure > 0.5f && archetype != EngineArchetype.Nuclear && archetype != EngineArchetype.Electric && archetype != EngineArchetype.Exotic) 
+            if (atmSensitivityIndex > KEDSettings.asiFlameoutThreshold && pressure > KEDSettings.asiPressureThreshold && archetype != EngineArchetype.Nuclear && archetype != EngineArchetype.Electric && archetype != EngineArchetype.Exotic) 
             {
                 float severity = (atmSensitivityIndex - 1.25f) * pressure;
                 float damageProbPerSec = 0.05f * severity * KEDSettings.globalRiskMultiplier;
@@ -654,59 +670,21 @@ namespace KerbalEngineDynamics
 
         private void ApplyPerformanceScars()
         {
-            // Reset multiplier before calculating to avoid double-dipping compounding penalties
             performanceMultiplier = 1.0f;
+            if (HasFailure(4)) performanceMultiplier *= 0.8f;
+            float penalty = (1.0f - (performanceScars * 0.01f)) * performanceMultiplier;
 
-            if (archetype == EngineArchetype.Monopropellant)
+            for (int i = 0; i < engineModules.Count; i++)
             {
-                // ISP Penalty: -1% per scar unit
-                float penalty = 1.0f - (performanceScars * 0.01f);
-                for (int i = 0; i < engineModules.Count; i++)
+                var e = engineModules[i];
+                var baseCurve = prefabAtmosphereCurves[i];
+                FloatCurve newCurve = new FloatCurve();
+                foreach (var key in baseCurve.Curve.keys)
                 {
-                    var e = engineModules[i];
-                    var baseCurve = prefabAtmosphereCurves[i];
-                    
-                    FloatCurve newCurve = new FloatCurve();
-                    foreach (var key in baseCurve.Curve.keys)
-                    {
-                        newCurve.Add(key.time, key.value * penalty);
-                    }
-                    e.atmosphereCurve = newCurve;
+                    newCurve.Add(key.time, key.value * penalty);
                 }
-                
-                // Thrust Drop (Mode 4) also reduces thrust by 20%
-                if (HasFailure(4)) performanceMultiplier *= 0.8f;
-
-                for (int i = 0; i < engineModules.Count; i++)
-                {
-                    engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier;
-                }
-            }
-            else if (archetype == EngineArchetype.Hypergolic)
-            {
-                // Thrust Penalty: -1% per scar unit
-                performanceMultiplier *= (1.0f - (performanceScars * 0.01f));
-                
-                // Also apply the 20% drop if current failure mode 4 is active
-                if (HasFailure(4)) performanceMultiplier *= 0.8f;
-
-                for (int i = 0; i < engineModules.Count; i++)
-                {
-                    engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier;
-                }
-            }
-            else
-            {
-                // Generic performance scars (-1% per scar unit)
-                performanceMultiplier *= (1.0f - (performanceScars * 0.01f));
-
-                // Default: Apply 20% drop if current failure mode 4 is active
-                if (HasFailure(4)) performanceMultiplier *= 0.8f;
-
-                for (int i = 0; i < engineModules.Count; i++)
-                {
-                    engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier;
-                }
+                e.atmosphereCurve = newCurve;
+                e.maxThrust = prefabMaxThrusts[i] * performanceMultiplier;
             }
         }
 
@@ -748,25 +726,26 @@ namespace KerbalEngineDynamics
             // --- TURBINE DYNAMIC UI ---
             if (KEDSettings.enableCryoSpinUp && archetype == EngineArchetype.Bipropellant && engineModules.Count > 0)
             {
-                float currentThrust = engineModules[0].maxThrust;
-                float maturityMod = (GetMaturityLevel() >= 3) ? 0.8f : (GetMaturityLevel() >= 1 ? 1.0f : 1.2f);
-                float pAtm = 0f;
-
                 if (HighLogic.LoadedSceneIsFlight)
                 {
-                    pAtm = (float)vessel.mainBody.GetPressure(vessel.altitude) / 101.325f;
-                    
+                    float currentThrust = engineModules[0].maxThrust;
+                    float maturityMod = (GetMaturityLevel() >= 3) ? 0.8f : (GetMaturityLevel() >= 1 ? 1.0f : 1.2f);
+                    float pAtm = (float)vessel.mainBody.GetPressure(vessel.altitude) / 101.325f;
+
                     if (isBurning) uiTurbineStatus = "<color=#00FF00>Active</color>";
                     else if (Planetarium.GetUniversalTime() - turbineShutdownUT < KEDSettings.cryoSpinDownGrace) uiTurbineStatus = "<color=#FFFF00>Spin-down</color>";
                     else uiTurbineStatus = "Ready";
+
+                    double ln2Cost = (currentThrust / 100f) * (1f + pAtm) * maturityMod;
+                    uiLN2Req = hasManualPrime ? "0.0 units (Primed)" : $"{ln2Cost:F2} units";
                 }
                 else if (HighLogic.LoadedSceneIsEditor)
                 {
-                    pAtm = 0f; 
+                    float currentThrust = engineModules[0].maxThrust;
+                    float maturityMod = (GetMaturityLevel() >= 3) ? 0.8f : (GetMaturityLevel() >= 1 ? 1.0f : 1.2f);
+                    double ln2Cost = (currentThrust / 100f) * 1.0f * maturityMod;
+                    uiLN2Req = $"{ln2Cost:F2} units";
                 }
-
-                double ln2Cost = (currentThrust / 100f) * (1f + pAtm) * maturityMod;
-                uiLN2Req = hasManualPrime ? "0.0 units (Primed)" : $"{ln2Cost:F2} units";
             }
         }
 
@@ -908,10 +887,17 @@ namespace KerbalEngineDynamics
 
 
 
+        public override void OnLoad(ConfigNode node) { base.OnLoad(node); SyncMasksToArrays(); }
+        public override void OnSave(ConfigNode node) { SyncArraysToMasks(); base.OnSave(node); }
+
         private void RefreshUI()
         {
             int lvl = GetMaturityLevel();
-            uiMaturity = $"Mk.{lvl} ({GetLevelName(lvl)})";
+            if (maturityLevelAtLaunch != lvl)
+                uiMaturity = $"Mk.{maturityLevelAtLaunch} (Live: Mk.{lvl})";
+            else
+                uiMaturity = $"Mk.{lvl} ({GetLevelName(lvl)})";
+            
             uiSerialNumber = serialNumber;
             
             float successRate = flightsCount > 0 ? (1f - (float)failuresCount / flightsCount) * 100f : 100f;
@@ -925,9 +911,10 @@ namespace KerbalEngineDynamics
             Fields["uiASI"].guiActive = false;
             Fields["uiASI"].guiActiveEditor = false;
 
-            bool showCryo = KEDSettings.enableCryoSpinUp && archetype == EngineArchetype.Bipropellant && (prefabMaxThrusts.Count > 0 && prefabMaxThrusts[0] >= 100f);
+            bool showCryo = KEDSettings.enableCryoSpinUp && archetype == EngineArchetype.Bipropellant;
             Fields["uiTurbineStatus"].guiActive = showCryo;
             Fields["uiLN2Req"].guiActive = showCryo;
+            Fields["uiLN2Req"].guiActiveEditor = showCryo;
 
             RefreshFaultUI();
         }
@@ -1029,7 +1016,14 @@ namespace KerbalEngineDynamics
                     }
                 }
             }
-            if (bestMP > 0) KEDScenario.Instance.AddMaturity(part.partInfo.name, bestMP * KEDSettings.heritageTransferRate);
+            if (bestMP > 0) 
+            {
+                float amount = bestMP * KEDSettings.heritageTransferRate;
+                if (KEDScenario.Instance.globalEngineMaturity.ContainsKey(part.partInfo.name)) 
+                    KEDScenario.Instance.globalEngineMaturity[part.partInfo.name] += amount;
+                else 
+                    KEDScenario.Instance.globalEngineMaturity.Add(part.partInfo.name, amount);
+            }
         }
 
         private void DetermineArchetype()
@@ -1155,84 +1149,86 @@ namespace KerbalEngineDynamics
 
         private void InitializeBatch()
         {
-            // Batch ID is shared per part name on the vessel
+            // 1. Look for siblings on the vessel
+            List<KEDModule> siblings = new List<KEDModule>();
+            foreach (Part p in vessel.parts)
+            {
+                if (p.partInfo.name == part.partInfo.name)
+                {
+                    var m = p.FindModuleImplementing<KEDModule>();
+                    if (m != null) siblings.Add(m);
+                }
+            }
+
+            // 2. Check if a sibling has ALREADY initialized the batch for this vessel
+            foreach (var m in siblings)
+            {
+                if (!string.IsNullOrEmpty(m.batchId) && m != this)
+                {
+                    // We are part of an existing batch. Copy the batch-wide stats and exit.
+                    this.batchId = m.batchId;
+                    this.isLemon = m.isLemon;
+                    this.uiBatchHint = m.uiBatchHint;
+                    this.lastCalculatedLemonProb = m.lastCalculatedLemonProb;
+                    return; 
+                }
+            }
+
+            // 3. If no sibling has a batchId, WE are the Batch Leader. 
+            // Generate the master Batch ID.
             batchId = $"{vessel.id}_{part.partInfo.name}";
             
-            // Generate Serial Number based on Game Time (UT)
+            // Generate Serial Number (kept local to this specific engine)
             double ut = Planetarium.GetUniversalTime();
             int year = (int)(ut / KSPUtil.dateTimeFormatter.Year) + 1;
             int day = (int)((ut % KSPUtil.dateTimeFormatter.Year) / KSPUtil.dateTimeFormatter.Day) + 1;
-            
             string partSlug = part.partInfo.name.Substring(0, Mathf.Min(3, part.partInfo.name.Length)).ToUpper();
             serialNumber = $"Y{year}-D{day}-{partSlug}-{UnityEngine.Random.Range(100, 999)}";
 
-            // Roll for Lemon
-            // P(Lemon) = MaturityAnchor + (Engine Count - 1) * 0.0167
-            int engineCount = 0;
-            foreach (Part p in vessel.parts) if (p.partInfo.name == part.partInfo.name) engineCount++;
-
+            // 4. Roll for the entire batch's fate
+            int engineCount = siblings.Count;
             float anchor = GetMaturityAnchor();
-            float lemonProb = (anchor + (engineCount - 1) * 0.0167f) * KEDSettings.globalRiskMultiplier;
+            float lemonProb = (anchor + (engineCount - 1) * KEDSettings.batchLemonProbScale) * KEDSettings.globalRiskMultiplier;
             
-            // Batch Lineage & Aging Factor
             if (KEDScenario.Instance != null)
             {
-                // Lineage Influence
-                if (KEDScenario.Instance.lineageRisk.TryGetValue(part.partInfo.name, out float risk))
-                {
-                    lemonProb += risk;
-                }
-
-                // Aging Factor (X+ flights)
+                if (KEDScenario.Instance.lineageRisk.TryGetValue(part.partInfo.name, out float risk)) lemonProb += risk;
                 if (KEDSettings.enableAging && KEDScenario.Instance.globalFlightsCount.TryGetValue(part.partInfo.name, out int globalFlights))
                 {
                     if (globalFlights > KEDSettings.agingFlightThreshold)
-                    {
-                        lemonProb += (globalFlights - KEDSettings.agingFlightThreshold) * KEDSettings.agingFactorInc; // Slow climb after threshold
-                    }
+                        lemonProb += (globalFlights - KEDSettings.agingFlightThreshold) * KEDSettings.agingFactorInc;
                 }
-
                 KEDScenario.Instance.AddFlight(part.partInfo.name);
             }
 
             lastCalculatedLemonProb = lemonProb;
             isLemon = UnityEngine.Random.value < lemonProb;
-            if (KEDScenario.Instance != null) KEDScenario.Instance.RecordBatchResult(part.partInfo.name, isLemon);
+            
+            if (KEDScenario.Instance != null) 
+                KEDScenario.Instance.RecordBatchResult(part.partInfo.name, isLemon);
 
+            if (isLemon) uiBatchHint = UnityEngine.Random.value < 0.7f ? "Slight variance detected in turbopump alignment." : "Batch vibration signature above nominal.";
+            else uiBatchHint = "Factory QA: All systems nominal.";
+
+            // 5. SYNC THE BATCH FATE TO ALL SIBLINGS immediately
+            foreach (var m in siblings)
+            {
+                m.batchId = this.batchId;
+                m.isLemon = this.isLemon;
+                m.uiBatchHint = this.uiBatchHint;
+                m.lastCalculatedLemonProb = this.lastCalculatedLemonProb;
+                // Do NOT sync isWeakUnit here. We want controlled chaos.
+            }
+
+            // 6. Finally, distribute the physical "Weak Unit" curses among the synced batch
             if (isLemon)
             {
-                uiBatchHint = UnityEngine.Random.value < 0.7f ? "Slight variance detected in turbopump alignment." : "Batch vibration signature above nominal.";
-                // Controlled Chaos: 80% 1 weak unit, 15% 2, 5% degraded batch
                 float roll = UnityEngine.Random.value;
                 if (roll < 0.80f) AssignWeakUnit(1);
                 else if (roll < 0.95f) AssignWeakUnit(2);
                 else ApplyDegradedBatch();
             }
-            else
-            {
-                uiBatchHint = "Factory QA: All systems nominal.";
-            }
-
-            // Fate Timer Initialization
-            if (isWeakUnit)
-            {
-                if (archetype == EngineArchetype.Solid)
-                {
-                    // SRB Logic: Trigger in 30-60% remaining window (40-70% used)
-                    // Centered at 50% for peak probability
-                    float r1 = UnityEngine.Random.Range(0.3f, 0.6f);
-                    float r2 = UnityEngine.Random.Range(0.3f, 0.6f);
-                    srbFailureFuelThreshold = (r1 + r2) / 2f;
-                    failureTriggerTime = -1; // Use fuel instead of time for SRBs
-                }
-                else
-                {
-                    // 50s Cap: Reveal Lemon early
-                    failureTriggerTime = UnityEngine.Random.Range(15f, 50f);
-                }
-            }
-
-            // Update lineage seed
+            
             KEDScenario.Instance.manufacturingSeeds[part.partInfo.name] = UnityEngine.Random.Range(0, 1000000);
         }
 
@@ -1248,12 +1244,24 @@ namespace KerbalEngineDynamics
                 }
             }
             
-            // Simple logic: the first N found get it, or randomize. Let's randomize.
             for (int i = 0; i < count && modules.Count > 0; i++)
             {
                 int idx = UnityEngine.Random.Range(0, modules.Count);
-                modules[idx].isWeakUnit = true;
-                modules[idx].failureTriggerTime = UnityEngine.Random.Range(15f, 50f);
+                KEDModule m = modules[idx];
+                m.isWeakUnit = true;
+
+                if (m.archetype == EngineArchetype.Solid)
+                {
+                    float r1 = UnityEngine.Random.Range(0.3f, 0.6f);
+                    float r2 = UnityEngine.Random.Range(0.3f, 0.6f);
+                    m.srbFailureFuelThreshold = (r1 + r2) / 2f;
+                    m.failureTriggerTime = -1;
+                }
+                else
+                {
+                    m.failureTriggerTime = UnityEngine.Random.Range(15f, 50f);
+                }
+
                 modules.RemoveAt(idx);
             }
         }
@@ -1337,7 +1345,7 @@ namespace KerbalEngineDynamics
             // Background Thrust: vessel is packed+thrusting or running in background
             if (!isBurning && KEDIntegration.HasBT)
             {
-                isBurning = KEDIntegration.IsVesselBurningBT(this.vessel);
+                isBurning = KEDIntegration.IsVesselBurningBT(this.vessel, _cachedBTVesselModule);
             }
 
             double now = Planetarium.GetUniversalTime();
@@ -1364,7 +1372,13 @@ namespace KerbalEngineDynamics
                         float maturityMod = (GetMaturityLevel() >= 3) ? 0.8f : (GetMaturityLevel() >= 1 ? 1.0f : 1.2f);
                         
                         double ln2Cost = (currentThrust / 100f) * (1f + pAtm) * maturityMod;
-                        double amountTaken = part.RequestResource("LqdNitrogen", ln2Cost);
+                        double amountTaken = 0;
+                        if (vessel.packed || TimeWarp.CurrentRateIndex > 0)
+                        {
+                            vessel.GetConnectedResourceTotals(PartResourceLibrary.Instance.GetDefinition("LqdNitrogen").id, out double totalLN2, out double maxLN2);
+                            if (totalLN2 >= ln2Cost) { amountTaken = ln2Cost; pendingLN2Debt += ln2Cost; }
+                        }
+                        else amountTaken = part.RequestResource("LqdNitrogen", ln2Cost);
                         
                         if (amountTaken < ln2Cost * 0.99) 
                         {
@@ -1383,6 +1397,13 @@ namespace KerbalEngineDynamics
                     turbineShutdownUT = Planetarium.GetUniversalTime();
                 }
             }
+            if (!vessel.packed && pendingLN2Debt > 0)
+            {
+                double taken = part.RequestResource("LqdNitrogen", pendingLN2Debt);
+                pendingLN2Debt -= taken;
+                if (pendingLN2Debt < 0.01) pendingLN2Debt = 0;
+            }
+
             lastFrameBurning = isBurning;
 
             if (isBurning)
@@ -1393,15 +1414,13 @@ namespace KerbalEngineDynamics
                 // Maturity: Engine Start
                 if (!maturityStartAwarded && (vessel.situation == Vessel.Situations.FLYING || vessel.altitude > 100))
                 {
-                    maturityStartAwarded = true;
-                    KEDEvents.OnMaturityGained.Fire(part.partInfo.name, KEDSettings.startBonus);
+                    AwardVesselMaturity(KEDSettings.startBonus, true);
                 }
 
                 // Maturity: Full Burn
                 if (!maturityBurnAwarded && cumulativeBurnSeconds > 60f)
                 {
-                    maturityBurnAwarded = true;
-                    KEDEvents.OnMaturityGained.Fire(part.partInfo.name, KEDSettings.burnBonus);
+                    AwardVesselMaturity(KEDSettings.burnBonus, false);
                 }
 
                 HandleReliabilityLogic(deltaT);
@@ -1418,6 +1437,41 @@ namespace KerbalEngineDynamics
                 OnIgnition();
             }
             lastIgnited = anyIgnited;
+        }
+
+        private void AwardVesselMaturity(float amount, bool isStart)
+        {
+            if (vessel == null) return;
+            
+            bool alreadyAwarded = false;
+            foreach (Part p in vessel.parts)
+            {
+                var m = p.FindModuleImplementing<KEDModule>();
+                if (m != null && p.partInfo.name == part.partInfo.name)
+                {
+                    if (isStart ? m.maturityStartAwarded : m.maturityBurnAwarded)
+                    {
+                        alreadyAwarded = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!alreadyAwarded)
+            {
+                KEDEvents.OnMaturityGained.Fire(part.partInfo.name, amount);
+            }
+
+            // Sync flags to all siblings so they don't try to award it again
+            foreach (Part p in vessel.parts)
+            {
+                var m = p.FindModuleImplementing<KEDModule>();
+                if (m != null && p.partInfo.name == part.partInfo.name)
+                {
+                    if (isStart) m.maturityStartAwarded = true;
+                    else m.maturityBurnAwarded = true;
+                }
+            }
         }
 
         private void OnIgnition()
@@ -1441,7 +1495,7 @@ namespace KerbalEngineDynamics
             float ignitionFailProb = ignitionFatigue * KEDSettings.globalRiskMultiplier;
             
             // Pristine Vacuum Bonus: 10x reliability for Good batches in space
-            if (!isLemon && atmSensitivityIndex > 1.25f && pressure < 0.1f) ignitionFailProb *= 0.1f;
+            if (!isLemon && atmSensitivityIndex > KEDSettings.asiWarningThreshold && pressure < KEDSettings.vacuumReliabilityBonus) ignitionFailProb *= KEDSettings.vacuumReliabilityBonus;
 
             // Qualified level reduces fatigue influence
             if (maturityLevelAtLaunch >= 1) ignitionFailProb *= 0.5f;
@@ -1485,14 +1539,14 @@ namespace KerbalEngineDynamics
             float pressure = (float)vessel.mainBody.GetPressure(vessel.altitude);
             
             // Vacuum Bonus: Reliability improves as pressure drops below threshold
-            if (atmSensitivityIndex > 1.25f && pressure < 0.1f)
+            if (atmSensitivityIndex > KEDSettings.asiWarningThreshold && pressure < 0.1f)
             {
                 // [DEPRECATED] failureTriggerTime += deltaT * (atmSensitivityIndex - 1.25f);
                 // Now handled via weighted failure modes in TriggerFailure()
             }
 
             // Flow Separation Warning in PAW (Vacuum nozzle in thick atmosphere)
-            if (atmSensitivityIndex > 1.5f && pressure > 0.5f)
+            if (atmSensitivityIndex > KEDSettings.asiFlameoutThreshold && pressure > KEDSettings.asiPressureThreshold)
             {
                 uiState = isFailed ? uiState : "DANGER: Flow Separation Risk";
             }
@@ -1501,7 +1555,7 @@ namespace KerbalEngineDynamics
                 uiState = "Nominal";
             }
 
-            if (atmSensitivityIndex > 1.5f && pressure > 0.5f && archetype != EngineArchetype.Nuclear && archetype != EngineArchetype.Electric && archetype != EngineArchetype.Exotic) 
+            if (atmSensitivityIndex > KEDSettings.asiFlameoutThreshold && pressure > KEDSettings.asiPressureThreshold && archetype != EngineArchetype.Nuclear && archetype != EngineArchetype.Electric && archetype != EngineArchetype.Exotic) 
             {
                 // Severe vibration from flow separation (Mach disks) damages the engine structure
                 float severity = (atmSensitivityIndex - 1.25f) * pressure;
@@ -1563,7 +1617,7 @@ namespace KerbalEngineDynamics
                 {
                     // --- VACUUM MODE SHIFT ---
                     float pressure = (float)vessel.mainBody.GetPressure(vessel.altitude);
-                    if (atmSensitivityIndex > 1.25f && pressure < 0.1f)
+                    if (atmSensitivityIndex > KEDSettings.asiWarningThreshold && pressure < 0.1f)
                     {
                         List<int> weightedPool = new List<int>();
                         foreach (int m in validModes)
@@ -1708,6 +1762,13 @@ namespace KerbalEngineDynamics
         {
             Vessel v = FlightGlobals.ActiveVessel;
             if (v == null || !v.isEVA) return;
+
+            if (diagnosticsRun)
+            {
+                ScreenMessages.PostScreenMessage("Diagnostics already performed on this unit.", 5f, ScreenMessageStyle.LOWER_CENTER);
+                return;
+            }
+
             var crew = v.GetVesselCrew()[0];
             if (crew.experienceTrait.Title != "Engineer") { ScreenMessages.PostScreenMessage("Only Engineers can run diagnostics."); return; }
             
@@ -2124,16 +2185,8 @@ namespace KerbalEngineDynamics
                 }
             }
 
-            // Perform a single initialization which will distribute effects
+            // Perform a single initialization which will now automatically distribute effects
             InitializeBatch();
-            
-            // Sync the lemon/batchId/hint to all siblings for UI consistency
-            foreach (var m in siblings)
-            {
-                m.batchId = this.batchId;
-                m.isLemon = this.isLemon;
-                m.uiBatchHint = this.uiBatchHint;
-            }
 
             ScreenMessages.PostScreenMessage($"Debug: Rerolled batch for {siblings.Count} engines.", 5f, ScreenMessageStyle.UPPER_CENTER);
         }

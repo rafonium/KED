@@ -124,13 +124,13 @@ namespace KerbalEngineDynamics
         /// (packed timewarp or background). Checks both the VesselModule (preferred)
         /// and the per-part BackgroundEngine toggle as a fallback.
         /// </summary>
-        public static bool IsVesselBurningBT(Vessel vessel)
+        public static bool IsVesselBurningBT(Vessel vessel, VesselModule cachedModule = null)
         {
             if (!HasBT || vessel == null) return false;
 
             // 1. Preferred path: query BackgroundThrustVessel.Active on the VesselModule
-            VesselModule vesselModule = null;
-            if (_btVesselModuleType != null)
+            VesselModule vesselModule = cachedModule;
+            if (vesselModule == null && _btVesselModuleType != null)
             {
                 vesselModule = FindVesselModule(vessel, _btVesselModuleType);
             }
@@ -182,11 +182,14 @@ namespace KerbalEngineDynamics
         /// Linear scan over vessel.vesselModules to find a module by reflected Type.
         /// KSP's FindVesselModuleImplementing is generic-only; this is the non-generic fallback.
         /// </summary>
-        private static VesselModule FindVesselModule(Vessel vessel, Type targetType)
+        public static VesselModule FindVesselModule(Vessel vessel, Type targetType)
         {
+            if (vessel == null || targetType == null) return null;
             foreach (VesselModule m in vessel.vesselModules)
                 if (m != null && m.GetType() == targetType) return m;
             return null;
         }
+
+        public static Type GetBTVesselModuleType() => _btVesselModuleType;
     }
 }
