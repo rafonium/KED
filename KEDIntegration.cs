@@ -1,5 +1,6 @@
 using System;
 using System.Reflection;
+using System.Linq.Expressions;
 using UnityEngine;
 
 namespace KerbalEngineDynamics
@@ -29,6 +30,12 @@ namespace KerbalEngineDynamics
         private static PropertyInfo _btActiveProperty;   // public bool Active
         private static PropertyInfo _btThrottleProperty; // public double Throttle
 
+        // Fast Delegates
+        private static Func<PartModule, object> _ptThrottleGetter;
+        private static Func<PartModule, bool>   _btIsEnabledGetter;
+        private static Func<VesselModule, bool> _btActiveGetter;
+        private static Func<VesselModule, double> _btThrottleGetter;
+
         private static bool _initialized = false;
 
         // -----------------------------------------------------------------------
@@ -45,43 +52,47 @@ namespace KerbalEngineDynamics
                     _ptEngineType = asm.assembly.GetType("PersistentThrust.PersistentEngine");
                     if (_ptEngineType != null)
                     {
-                        // PT API is undocumented; try common field/property names
                         _ptThrottleField =
-                            _ptEngineType.GetField("isEnabled",     BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) ??
+                            _ptEngineType.GetField("isEnabled",      BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) ??
                             _ptEngineType.GetField("vesselThrottle", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                        HasPT = true;
+                        
+                        if (_ptThrottleField != null)
+                        {
+                            _ptThrottleGetter = CreateFieldGetter<PartModule, object>(_ptEngineType, _ptThrottleField);
+                            HasPT = true;
+                        }
                     }
                 }
 
                 // --- Background Thrust ---
-                // Match the core assembly and all integration sub-assemblies ("BackgroundThrust.BRP", etc.)
                 if (asm.name.Equals("BackgroundThrust", StringComparison.OrdinalIgnoreCase) ||
                     asm.name.StartsWith("BackgroundThrust.", StringComparison.OrdinalIgnoreCase))
                 {
                     HasBT = true;
 
-                    // BackgroundEngine — per-part PartModule; IsEnabled is a public KSPField
                     if (_btEngineType == null)
                     {
                         _btEngineType = asm.assembly.GetType("BackgroundThrust.BackgroundEngine");
                         if (_btEngineType != null)
                         {
-                            // Field name: "IsEnabled" (capital I) — confirmed from source BackgroundEngine.cs:26
-                            _btIsEnabledField = _btEngineType.GetField(
-                                "IsEnabled", BindingFlags.Instance | BindingFlags.Public);
+                            _btIsEnabledField = _btEngineType.GetField("IsEnabled", BindingFlags.Instance | BindingFlags.Public);
+                            if (_btIsEnabledField != null)
+                                _btIsEnabledGetter = CreateFieldGetter<PartModule, bool>(_btEngineType, _btIsEnabledField);
                         }
                     }
 
-                    // BackgroundThrustVessel — VesselModule; Active and Throttle are the authoritative burn state
                     if (_btVesselModuleType == null)
                     {
                         _btVesselModuleType = asm.assembly.GetType("BackgroundThrust.BackgroundThrustVessel");
                         if (_btVesselModuleType != null)
                         {
-                            // bool Active { get }  — returns true when packed+thrusting or background+thrusting
                             _btActiveProperty   = _btVesselModuleType.GetProperty("Active",   BindingFlags.Instance | BindingFlags.Public);
-                            // double Throttle { get } — readable even when vessel is packed
                             _btThrottleProperty = _btVesselModuleType.GetProperty("Throttle", BindingFlags.Instance | BindingFlags.Public);
+                            
+                            if (_btActiveProperty != null)
+                                _btActiveGetter = CreatePropertyGetter<VesselModule, bool>(_btVesselModuleType, _btActiveProperty);
+                            if (_btThrottleProperty != null)
+                                _btThrottleGetter = CreatePropertyGetter<VesselModule, double>(_btVesselModuleType, _btThrottleProperty);
                         }
                     }
                 }
@@ -95,83 +106,83 @@ namespace KerbalEngineDynamics
             }
         }
 
+        private static Func<TTarget, TValue> CreateFieldGetter<TTarget, TValue>(Type actualType, FieldInfo field)
+        {
+            var targetExp = Expression.Parameter(typeof(TTarget), "target");
+            var castExp = Expression.TypeAs(targetExp, actualType);
+            var fieldExp = Expression.Field(castExp, field);
+            var resultExp = Expression.Convert(fieldExp, typeof(TValue));
+            return Expression.Lambda<Func<TTarget, TValue>>(resultExp, targetExp).Compile();
+        }
+
+        private static Func<TTarget, TValue> CreatePropertyGetter<TTarget, TValue>(Type actualType, PropertyInfo prop)
+        {
+            var targetExp = Expression.Parameter(typeof(TTarget), "target");
+            var castExp = Expression.TypeAs(targetExp, actualType);
+            var propExp = Expression.Property(castExp, prop);
+            var resultExp = Expression.Convert(propExp, typeof(TValue));
+            return Expression.Lambda<Func<TTarget, TValue>>(resultExp, targetExp).Compile();
+        }
+
         // -----------------------------------------------------------------------
         /// <summary>
         /// Returns true if Persistent Thrust is currently driving this part's engine on-rails.
+        /// Use the overload that takes a cached PartModule for performance.
         /// </summary>
         public static bool IsEngineActivePT(Part part)
         {
             if (!HasPT || _ptEngineType == null || part == null) return false;
-
             var module = part.Modules.GetModule(_ptEngineType.Name);
-            if (module == null) return false;
+            return IsEngineActivePT(module);
+        }
+
+        public static bool IsEngineActivePT(PartModule module)
+        {
+            if (_ptThrottleGetter == null || module == null) return false;
 
             try
             {
-                object val = _ptThrottleField?.GetValue(module);
+                object val = _ptThrottleGetter(module);
                 if (val is bool b)   return b;
                 if (val is float f)  return f > 0.01f;
                 if (val is double d) return d > 0.01;
             }
-            catch { /* Reflection failure — fall through */ }
+            catch { }
 
             return false;
         }
 
         // -----------------------------------------------------------------------
         /// <summary>
-        /// Returns true if Background Thrust is actively burning this vessel's engines
-        /// (packed timewarp or background). Checks both the VesselModule (preferred)
-        /// and the per-part BackgroundEngine toggle as a fallback.
+        /// Returns true if Background Thrust is actively burning this vessel's engines.
+        /// Optimized version that avoids vessel-wide part iteration.
         /// </summary>
-        public static bool IsVesselBurningBT(Vessel vessel, VesselModule cachedModule = null)
+        public static bool IsVesselBurningBT(Vessel vessel, PartModule cachedBTEngine, VesselModule cachedVesselModule = null)
         {
             if (!HasBT || vessel == null) return false;
 
-            // 1. Preferred path: query BackgroundThrustVessel.Active on the VesselModule
-            VesselModule vesselModule = cachedModule;
-            if (vesselModule == null && _btVesselModuleType != null)
-            {
-                vesselModule = FindVesselModule(vessel, _btVesselModuleType);
-            }
-
-            if (vesselModule != null && _btActiveProperty != null)
+            // Enforce Part-Level Checking to avoid false positives for unstaged engines.
+            // We only count the engine as burning if its specific BackgroundEngine is enabled 
+            // AND the vessel's background throttle is active.
+            if (cachedBTEngine != null && _btIsEnabledGetter != null)
             {
                 try
                 {
-                    object active = _btActiveProperty.GetValue(vesselModule);
-                    if (active is bool b) return b;
-                }
-                catch { /* fall through to part-level check */ }
-            }
-
-            // 2. Fallback: check if any BackgroundEngine on the vessel has IsEnabled=true and throttle>0
-            if (_btEngineType != null && _btIsEnabledField != null)
-            {
-                try
-                {
-                    foreach (Part p in vessel.parts)
+                    if (_btIsEnabledGetter(cachedBTEngine))
                     {
-                        var btMod = p.Modules.GetModule(_btEngineType.Name);
-                        if (btMod == null) continue;
-
-                        object enabled = _btIsEnabledField.GetValue(btMod);
-                        if (enabled is bool isEnabled && isEnabled)
+                        // Now verify that the vessel actually has a non-zero background throttle
+                        VesselModule vesselModule = cachedVesselModule ?? FindVesselModule(vessel, _btVesselModuleType);
+                        if (vesselModule != null && _btThrottleGetter != null)
                         {
-                            // Throttle check via VesselModule (using the cached module)
-                            if (vesselModule != null && _btThrottleProperty != null)
-                            {
-                                object throttle = _btThrottleProperty.GetValue(vesselModule);
-                                if (throttle is double d && d > 0.01) return true;
-                            }
-                            else
-                            {
-                                return true; // No throttle check available — assume burning if enabled
-                            }
+                            return _btThrottleGetter(vesselModule) > 0.01;
                         }
+
+                        // If we have no throttle info but the vessel is packed, 
+                        // we assume the 'IsEnabled' state is authoritative.
+                        return vessel.packed;
                     }
                 }
-                catch { /* Reflection failure */ }
+                catch { }
             }
 
             return false;
@@ -191,5 +202,7 @@ namespace KerbalEngineDynamics
         }
 
         public static Type GetBTVesselModuleType() => _btVesselModuleType;
+        public static string GetPTEngineTypeName() => _ptEngineType?.Name;
+        public static string GetBTEngineTypeName() => _btEngineType?.Name;
     }
 }
