@@ -1,3 +1,29 @@
-Contexts/
-notes/
+# Visual Studio / .NET
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+*.sln.docstates
+*.pdb
+
+# KSP Logs and Output
+KSP.log
+KSP_x64_Data/
+Logs/
+
+# Project Specific Ignored Directories
+# (Source code or assets that are referenced but not part of this mod's core repository)
 BackgroundThrust-main/
+contexts/
+notes/
+scratch/
+
+# Temporary / Development Files
+test.cs
+*.tmp
+*.bak
+
+# OS Generated Files
+Thumbs.db
+.DS_Store
