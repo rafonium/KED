@@ -305,8 +305,12 @@ namespace KerbalEngineDynamics
         {
             if (pv == null || pv.vesselRef == null) return;
             
-            // SubOrbital or greater check
-            if (pv.vesselRef.orbit.ApA < pv.vesselRef.mainBody.atmosphereDepth && pv.vesselRef.situation != Vessel.Situations.SUB_ORBITAL && pv.vesselRef.situation != Vessel.Situations.ORBITING && pv.vesselRef.situation != Vessel.Situations.ESCAPING)
+            // Recovery Condition: Reached Space OR meaningful atmospheric flight (>5 mins)
+            bool reachedSpace = (pv.vesselRef.orbit.ApA >= pv.vesselRef.mainBody.atmosphereDepth) || 
+                                (pv.vesselRef.situation == Vessel.Situations.SUB_ORBITAL || pv.vesselRef.situation == Vessel.Situations.ORBITING || pv.vesselRef.situation == Vessel.Situations.ESCAPING);
+            bool atmosphericMission = (pv.vesselRef.missionTime >= 300.0);
+
+            if (!reachedSpace && !atmosphericMission)
                 return;
 
             HashSet<string> recoveredTypes = new HashSet<string>();
@@ -798,6 +802,12 @@ namespace KerbalEngineDynamics
 
         public void Update()
         {
+            // --- LIVE UI PULSE (Throttled to 30 frames ~ 0.5s) ---
+            if (HighLogic.LoadedSceneIsFlight && (Time.frameCount + debugTickOffset) % 30 == 0)
+            {
+                RefreshUI();
+            }
+
             if (KEDSettings.debugMode && HighLogic.LoadedSceneIsFlight)
             {
                 if ((Time.frameCount + debugTickOffset) % 30 == 0)
@@ -2545,6 +2555,7 @@ namespace KerbalEngineDynamics
 
         public override string GetInfo()
         {
+            KEDSettings.EnsureInitialized();
             DetermineArchetype();
             string info = $"<color=#00e6e6><b>KED SPECIFICATION</b></color>\nArchetype: {archetype}";
 
