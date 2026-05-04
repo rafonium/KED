@@ -264,6 +264,11 @@ namespace KerbalEngineDynamics
             float yield = amount * KEDSettings.maturityYieldMultiplier;
             if (globalEngineMaturity.ContainsKey(partName)) globalEngineMaturity[partName] += yield;
             else globalEngineMaturity.Add(partName, yield);
+
+            // Notification
+            AvailablePart ap = PartLoader.getPartInfoByName(partName);
+            string title = ap != null ? ap.title : partName;
+            PostQueuedMessage($"<b>[KED]</b> {title} gained <color=#00FF00>+{yield:F1} MP</color>", 3f, ScreenMessageStyle.LOWER_CENTER);
         }
 
         public void AddFlight(string partName)
@@ -428,6 +433,10 @@ namespace KerbalEngineDynamics
         public string uiTelemetry = "Nominal";
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Tech Rating", groupName = "KED")]
         public string uiMaturity = "";
+        [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Total MP", groupName = "KED")]
+        public string uiMPTracker = "";
+        [KSPField(guiActive = true, guiName = "Burn Time", groupName = "KED")]
+        public string uiBurnTime = "0s";
         [KSPField(guiActive = true, guiName = "Status", groupName = "KED")]
         public string uiState = "Nominal";
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "ASI", groupName = "KED")]
@@ -450,7 +459,6 @@ namespace KerbalEngineDynamics
         private int debugTickOffset;
 
         [KSPField(isPersistant = true)] public EngineArchetype archetype = EngineArchetype.Thermodynamic;
-        private bool lastIgnited = false;
         public bool IsFailed => HasFailure(1) || HasFailure(2) || HasFailure(3) || HasFailure(4) || HasFailure(5);
 
         private void SyncMasksToArrays()
@@ -648,6 +656,24 @@ namespace KerbalEngineDynamics
             }
             RefreshUI();
             UpdateDebugUI();
+
+            // Initialize ignition state based on current scene state to prevent phantom start awards
+            lastFrameBurning = CheckIsBurning(); 
+        }
+
+        private bool CheckIsBurning()
+        {
+            if (engineModules.Count == 0) return false;
+            bool burning = false;
+            for (int i = 0; i < engineModules.Count; i++)
+                if (engineModules[i].EngineIgnited && engineModules[i].currentThrottle > 0.01f && !engineModules[i].flameout) { burning = true; break; }
+            
+            if (!burning && KEDIntegration.HasPT && (vessel.packed || engineModules.Any(e => e.EngineIgnited)))
+                burning = KEDIntegration.IsEngineActivePT(_cachedPTEngine);
+            if (!burning && KEDIntegration.HasBT && (vessel.packed || engineModules.Any(e => e.EngineIgnited)))
+                burning = KEDIntegration.IsVesselBurningBT(this.vessel, _cachedBTEngine, _cachedBTVesselModule);
+            
+            return burning;
         }
 
         private double GetVesselPropellantMass()
@@ -964,6 +990,63 @@ namespace KerbalEngineDynamics
             }
         }
 
+        private float GetNextMilestoneMP()
+        {
+            float mp = KEDScenario.GetMaturity(part.partInfo.name);
+            switch (archetype)
+            {
+                case EngineArchetype.Exotic:
+                    if (mp < KEDSettings.exotic_L1) return KEDSettings.exotic_L1;
+                    break;
+                case EngineArchetype.Nuclear:
+                    if (mp < KEDSettings.nuc_L1) return KEDSettings.nuc_L1;
+                    if (mp < KEDSettings.nuc_L2) return KEDSettings.nuc_L2;
+                    break;
+                case EngineArchetype.Electric:
+                    if (mp < KEDSettings.elec_L1) return KEDSettings.elec_L1;
+                    if (mp < KEDSettings.elec_L2) return KEDSettings.elec_L2;
+                    break;
+                case EngineArchetype.Solid:
+                    if (mp < KEDSettings.solid_L1) return KEDSettings.solid_L1;
+                    if (mp < KEDSettings.solid_L2) return KEDSettings.solid_L2;
+                    break;
+                case EngineArchetype.Monopropellant:
+                    if (mp < KEDSettings.mono_L1) return KEDSettings.mono_L1;
+                    if (mp < KEDSettings.mono_L2) return KEDSettings.mono_L2;
+                    if (mp < KEDSettings.mono_L3) return KEDSettings.mono_L3;
+                    break;
+                case EngineArchetype.Hypergolic:
+                    if (mp < KEDSettings.hyper_L1) return KEDSettings.hyper_L1;
+                    if (mp < KEDSettings.hyper_L2) return KEDSettings.hyper_L2;
+                    if (mp < KEDSettings.hyper_L3) return KEDSettings.hyper_L3;
+                    break;
+                case EngineArchetype.Airbreathing:
+                    if (mp < KEDSettings.air_L1) return KEDSettings.air_L1;
+                    if (mp < KEDSettings.air_L2) return KEDSettings.air_L2;
+                    if (mp < KEDSettings.air_L3) return KEDSettings.air_L3;
+                    break;
+                case EngineArchetype.Bipropellant:
+                    if (mp < KEDSettings.biprop_L1) return KEDSettings.biprop_L1;
+                    if (mp < KEDSettings.biprop_L2) return KEDSettings.biprop_L2;
+                    if (mp < KEDSettings.biprop_L3) return KEDSettings.biprop_L3;
+                    if (mp < KEDSettings.biprop_L4) return KEDSettings.biprop_L4;
+                    break;
+                case EngineArchetype.Advanced:
+                    if (mp < KEDSettings.adv_L1) return KEDSettings.adv_L1;
+                    if (mp < KEDSettings.adv_L2) return KEDSettings.adv_L2;
+                    if (mp < KEDSettings.adv_L3) return KEDSettings.adv_L3;
+                    if (mp < KEDSettings.adv_L4) return KEDSettings.adv_L4;
+                    break;
+                case EngineArchetype.Thermodynamic:
+                    if (mp < KEDSettings.thermo_L1) return KEDSettings.thermo_L1;
+                    if (mp < KEDSettings.thermo_L2) return KEDSettings.thermo_L2;
+                    if (mp < KEDSettings.thermo_L3) return KEDSettings.thermo_L3;
+                    if (mp < KEDSettings.thermo_L4) return KEDSettings.thermo_L4;
+                    break;
+            }
+            return -1f;
+        }
+
 
 
         public override void OnLoad(ConfigNode node) { base.OnLoad(node); SyncMasksToArrays(); }
@@ -976,6 +1059,15 @@ namespace KerbalEngineDynamics
                 uiMaturity = $"Mk.{maturityLevelAtLaunch} (Live: Mk.{lvl})";
             else
                 uiMaturity = $"Mk.{lvl} ({GetLevelName(lvl)})";
+
+            float currentMP = KEDScenario.GetMaturity(part.partInfo.name);
+            float nextMP = GetNextMilestoneMP();
+            if (nextMP > 0)
+                uiMPTracker = $"{currentMP:F1} / {nextMP:F1} MP";
+            else
+                uiMPTracker = $"{currentMP:F1} MP (Max)";
+
+            uiBurnTime = $"{cumulativeBurnSeconds:F1}s";
             
             uiSerialNumber = serialNumber;
             
@@ -1387,30 +1479,13 @@ namespace KerbalEngineDynamics
                 for (int i = 0; i < engineModules.Count; i++) { engineModules[i].maxThrust = prefabMaxThrusts[i] * performanceMultiplier; }
             }
 
-            isBurning = false;
-            for (int i = 0; i < engineModules.Count; i++)
-            {
-                var e = engineModules[i];
-                if (e.EngineIgnited && e.currentThrottle > 0.01f && !e.flameout) { isBurning = true; break; }
-            }
+            isBurning = CheckIsBurning();
 
-            // Background/Persistent Thrust Overrides:
-            // In the active flight scene (unpacked), we only trust BT/PT if the engine has been 
-            // ignited/staged at least once. If packed, we assume the mods are handling the on-rails burn.
-            bool anyIgnited = false;
-            for (int i = 0; i < engineModules.Count; i++) if (engineModules[i].EngineIgnited) { anyIgnited = true; break; }
-            bool canBurnInMod = vessel.packed || anyIgnited; 
-
-            // Persistent Thrust: engine may be driving thrust on-rails when vanilla appears off
-            if (!isBurning && KEDIntegration.HasPT && canBurnInMod)
+            // --- IGNITION TRACKING (Throttle-Aware) ---
+            if (isBurning && !lastFrameBurning)
             {
-                isBurning = KEDIntegration.IsEngineActivePT(_cachedPTEngine);
-            }
-
-            // Background Thrust: vessel is packed+thrusting
-            if (!isBurning && KEDIntegration.HasBT && canBurnInMod)
-            {
-                isBurning = KEDIntegration.IsVesselBurningBT(this.vessel, _cachedBTEngine, _cachedBTVesselModule);
+                OnIgnition();
+                isBurning = CheckIsBurning(); // Re-sync if ignition failed immediately
             }
 
             double now = Planetarium.GetUniversalTime();
@@ -1507,12 +1582,7 @@ namespace KerbalEngineDynamics
 
             // --- SENSORY CUES (JITTER) REMOVED ---
 
-            // --- IGNITION TRACKING ---
-            if (anyIgnited && !lastIgnited)
-            {
-                OnIgnition();
-            }
-            lastIgnited = anyIgnited;
+            // lastFrameBurning is already synced at line 1504 (now 1520 approx)
         }
 
         private void AwardVesselMaturity(float amount, bool isStart)
@@ -1967,16 +2037,22 @@ namespace KerbalEngineDynamics
             KEDSettings.engineerGates.TryGetValue(archetype.ToString().ToUpper(), out int minLevel);
             if (!TryGetValidEngineer(out _, out _, minLevel)) return;
 
-            // --- SpecializedParts phase: 5% of engine dry mass ---
-            double specCost = Math.Ceiling(part.mass * KEDSettings.overhaulMassRatio);
+            // --- SpecializedParts phase: % of engine dry mass ---
+            double density = 0.001; // Fallback to 1kg/unit
+            var resDef = PartResourceLibrary.Instance.GetDefinition("SpecializedParts");
+            if (resDef != null) density = Math.Max(0.0001, (double)resDef.density);
+
+            double targetMassTonnes = (double)part.mass * (double)KEDSettings.overhaulMassRatio;
+            double specCost = Math.Ceiling(targetMassTonnes / density);
+
             if (specCost > 0.5)
             {
                 double taken = ConsumeSpecializedParts(specCost);
                 if (taken < specCost * 0.99)
                 {
                     ScreenMessages.PostScreenMessage(
-                        $"[KED] Overhaul needs {specCost:F0} SpecializedParts on vessel " +
-                        $"({part.mass * 1000:F0} kg engine × {KEDSettings.overhaulMassRatio * 100:F0}%).", 6f);
+                        $"[KED] Overhaul needs {specCost:F0} SpecializedParts ({targetMassTonnes * 1000:F1}kg) " +
+                        $"for this {part.mass * 1000:F0}kg engine.", 6f, ScreenMessageStyle.UPPER_CENTER);
                     return;
                 }
             }
