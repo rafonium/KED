@@ -1,4 +1,4 @@
-# Kerbal Engine Dynamics (KED) 3.0
+# Kerbal Engine Dynamics (KED)
 **A Total Overhaul of Engine Reliability for KSP**
 
 Kerbal Engine Dynamics (KED) replaces the simple random failures of other mods with a **manufacturing-first model**. Every engine on your rocket has a serial number, a lineage, and a technical history.
@@ -9,7 +9,7 @@ Kerbal Engine Dynamics (KED) replaces the simple random failures of other mods w
 
 ## 🏗️ The Core Pillars
 
-KED 3.0 is built on four interactive systems that turn engine management into a strategic layer of your space program:
+KED is built on four interactive systems that turn engine management into a strategic layer of your space program:
 
 1.  **Batch Quality System (BQS)**: Engines are built in lots. Symmetry groups share a "Batch Leader" — if one is a Lemon, the whole group is at risk.
 2.  **Operational Maturity System (OMS)**: Your agency gains experience with every flight. "Heritage" engines are nearly flawless; "Prototypes" are dangerous experiments.
@@ -148,4 +148,4 @@ KED is fully customizable via `KED_Settings.cfg`.
 
 ---
 
-> "KED 3.0 ensures that every engine tells a story. From the first experimental prototypes to the heritage workhorses that carry your agency to the stars."
+> "KED ensures that every engine tells a story. From the first experimental prototypes to the heritage workhorses that carry your agency to the stars."
