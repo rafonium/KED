@@ -240,6 +240,7 @@ namespace KerbalEngineDynamics
         public Dictionary<string, int> manufacturingSeeds = new Dictionary<string, int>();
         public Dictionary<string, int> globalFlightsCount = new Dictionary<string, int>();
         public Dictionary<string, float> lineageRisk = new Dictionary<string, float>();
+        public HashSet<string> batchAwards = new HashSet<string>();
 
         private Queue<ScreenMessage> messageQueue = new Queue<ScreenMessage>();
         private float lastMessageTime = 0f;
@@ -346,6 +347,9 @@ namespace KerbalEngineDynamics
 
             ConfigNode riskNode = node.AddNode("LineageRisk");
             foreach (var kvp in lineageRisk) riskNode.AddValue(kvp.Key, kvp.Value.ToString());
+
+            ConfigNode awardNode = node.AddNode("BatchAwards");
+            foreach (var award in batchAwards) awardNode.AddValue("award", award);
         }
 
         public override void OnLoad(ConfigNode node) 
@@ -371,6 +375,11 @@ namespace KerbalEngineDynamics
             {
                 foreach (ConfigNode.Value val in node.GetNode("LineageRisk").values)
                     if (float.TryParse(val.value, out float risk)) lineageRisk[val.name] = risk;
+            }
+            if (node.HasNode("BatchAwards"))
+            {
+                foreach (ConfigNode.Value val in node.GetNode("BatchAwards").values)
+                    batchAwards.Add(val.value);
             }
         }
     }
@@ -451,6 +460,14 @@ namespace KerbalEngineDynamics
         public string uiHistory = "";
         [KSPField(guiActive = true, guiName = "Yield", groupName = "KED")]
         public string uiPerformance = "100%";
+        [KSPField(guiActive = true, guiName = "Efficiency", groupName = "KED")]
+        public string uiISPEfficiency = "";
+        [KSPField(guiActive = true, guiName = "Max Thrust (Amb)", groupName = "KED")]
+        public string uiMaxThrustAmb = "";
+        [KSPField(guiActive = true, guiName = "Ignition Stability", groupName = "KED")]
+        public string uiIgnitionStability = "";
+        [KSPField(guiActive = true, guiName = "Hardware Stress", groupName = "KED")]
+        public string uiHardwareStress = "";
         [KSPField(guiActive = true, guiName = "Turbine", groupName = "KED")]
         public string uiTurbineStatus = "Ready";
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Spin-up Req", groupName = "KED")]
@@ -1084,9 +1101,46 @@ namespace KerbalEngineDynamics
             float successRate = flightsCount > 0 ? (1f - (float)failuresCount / flightsCount) * 100f : 100f;
             uiHistory = $"{flightsCount} Flights | {successRate:F0}% Yield";
             uiPerformance = $"{performanceMultiplier:P0}";
+
+            // --- Enhanced Telemetry Calculations ---
+            if (engineModules.Count > 0)
+            {
+                ModuleEngines e = engineModules[0];
+                float pAtm = (float)vessel.staticPressurekPa;
+                float currentIsp = e.atmosphereCurve.Evaluate(pAtm);
+                float vacIsp = e.atmosphereCurve.Evaluate(0f);
+                
+                // ISP Efficiency (based on scars)
+                float ispEfficiency = (1.0f - performanceScars * 0.01f);
+                string ispColor = "#00FF00"; // Green
+                if (ispEfficiency < 0.90f) ispColor = "#FF3333"; // Red
+                else if (ispEfficiency < 0.999f) ispColor = "#FFFF00"; // Yellow
+                
+                uiISPEfficiency = $"<color={ispColor}>{ispEfficiency:P1}</color> ({currentIsp:F1}s)";
+
+                // Ambient Max Thrust (accounting for pressure and performanceMultiplier)
+                // Thrust scales with ISP for standard rocket engines: Thrust = MassFlow * g * ISP
+                // So MaxThrust_Amb = MaxThrust_Vac * (Isp_Amb / Isp_Vac)
+                float ambThrust = (vacIsp > 0) ? e.maxThrust * (currentIsp / vacIsp) : 0f;
+                uiMaxThrustAmb = $"{ambThrust:F1} kN";
+
+                // Ignition Stability
+                float ignFailProb = ComputeIgnitionFailProb();
+                float stability = (1f - ignFailProb);
+                string stabColor = (stability > 0.95f) ? "#00FF00" : (stability > 0.80f ? "#FFFF00" : "#FF3333");
+                uiIgnitionStability = $"<color={stabColor}>{stability:P1}</color>";
+
+                // Hardware Stress
+                uiHardwareStress = $"S: {structuralFatigueCycles} | C: {chemicalFatigue:P1}";
+            }
             
             // Smart Visibility
             Fields["uiPerformance"].guiActive = (performanceMultiplier < 0.99f);
+            Fields["uiISPEfficiency"].guiActive = true;
+            Fields["uiMaxThrustAmb"].guiActive = HighLogic.LoadedSceneIsFlight;
+            Fields["uiIgnitionStability"].guiActive = true;
+            Fields["uiHardwareStress"].guiActive = true;
+            
             Fields["uiBatchHint"].guiActive = false;
             Fields["uiBatchHint"].guiActiveEditor = true;
             Fields["uiASI"].guiActive = false;
@@ -1597,28 +1651,22 @@ namespace KerbalEngineDynamics
 
         private void AwardVesselMaturity(float amount, bool isStart)
         {
-            if (vessel == null) return;
+            if (vessel == null || KEDScenario.Instance == null) return;
             
-            bool alreadyAwarded = false;
-            foreach (Part p in vessel.parts)
-            {
-                var m = p.FindModuleImplementing<KEDModule>();
-                if (m != null && p.partInfo.name == part.partInfo.name)
-                {
-                    if (isStart ? m.maturityStartAwarded : m.maturityBurnAwarded)
-                    {
-                        alreadyAwarded = true;
-                        break;
-                    }
-                }
-            }
+            // Per-batch award tracking (prevents symmetry groups from over-farming MP)
+            string action = isStart ? "Start" : "Burn";
+            string awardKey = $"{batchId}_{action}";
+            if (KEDScenario.Instance.batchAwards.Contains(awardKey)) return;
 
-            if (!alreadyAwarded)
-            {
-                KEDEvents.OnMaturityGained.Fire(part.partInfo.name, amount);
-                if (isStart) maturityStartAwarded = true;
-                else maturityBurnAwarded = true;
-            }
+            // Persistent part-level safeguard
+            if (isStart && maturityStartAwarded) return;
+            if (!isStart && maturityBurnAwarded) return;
+
+            KEDEvents.OnMaturityGained.Fire(part.partInfo.name, amount);
+            KEDScenario.Instance.batchAwards.Add(awardKey);
+
+            if (isStart) maturityStartAwarded = true;
+            else maturityBurnAwarded = true;
         }
 
         private void OnIgnition()
@@ -1997,7 +2045,17 @@ namespace KerbalEngineDynamics
             }
 
             hasBeenInspected = true;
-            KEDEvents.OnMaturityGained.Fire(part.partInfo.name, 5f); // Inspection Bonus
+            
+            // MP Award: Once per batch for nominal engines, EXCEPT for failures which are per-engine
+            if (KEDScenario.Instance != null)
+            {
+                string awardKey = IsFailed ? $"{serialNumber}_FailInspect" : $"{batchId}_Inspect";
+                if (!KEDScenario.Instance.batchAwards.Contains(awardKey))
+                {
+                    KEDEvents.OnMaturityGained.Fire(part.partInfo.name, 5f); // Inspection Bonus
+                    KEDScenario.Instance.batchAwards.Add(awardKey);
+                }
+            }
 
             if (isWeakUnit)
                 ScreenMessages.PostScreenMessage($"Inspection complete — S/N {serialNumber}: Possible structural variance detected. Maintenance recommended.", 8f, ScreenMessageStyle.LOWER_CENTER);
