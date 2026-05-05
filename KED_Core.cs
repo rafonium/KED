@@ -470,8 +470,10 @@ namespace KerbalEngineDynamics
         public string uiHardwareStress = "";
         [KSPField(guiActive = true, guiName = "Turbine", groupName = "KED")]
         public string uiTurbineStatus = "Ready";
-        [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Spin-up Req", groupName = "KED")]
+        [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Spin-up Req (Vac)", groupName = "KED")]
         public string uiSpinUpReq = "0 units";
+        [KSPField(guiActive = false, guiActiveEditor = true, guiName = "Spin-up Req (1 ATM)", groupName = "KED")]
+        public string uiSpinUpReqAtm = "0 units";
 
         // --- DEBUG UI ---
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "KED Telemetry", groupName = "KED_Debug", groupDisplayName = "DEBUG: ENGINE CONTROL")]
@@ -865,6 +867,7 @@ namespace KerbalEngineDynamics
                     else if (Planetarium.GetUniversalTime() - turbineShutdownUT < KEDSettings.cryoSpinDownGrace) uiTurbineStatus = "<color=#FFFF00>Spin-down</color>";
                     else uiTurbineStatus = "Ready";
 
+                    Fields["uiSpinUpReq"].guiName = "Spin-up Req";
                     if (isBiprop)
                     {
                         double ln2Cost = (currentThrust / 100f) * (1f + pAtm) * maturityMod * KEDSettings.cryoSpinUpMultiplier;
@@ -881,15 +884,20 @@ namespace KerbalEngineDynamics
                     float currentThrust = engineModules[0].maxThrust;
                     float maturityMod = (GetMaturityLevel() >= 3) ? 0.8f : (GetMaturityLevel() >= 1 ? 1.0f : 1.2f);
                     
+                    Fields["uiSpinUpReq"].guiName = "Spin-up Req (Vac)";
                     if (isBiprop)
                     {
-                        double ln2Cost = (currentThrust / 100f) * 1.0f * maturityMod * KEDSettings.cryoSpinUpMultiplier;
-                        uiSpinUpReq = $"{ln2Cost:F2} LN2";
+                        double ln2CostVac = (currentThrust / 100f) * 1.0f * maturityMod * KEDSettings.cryoSpinUpMultiplier;
+                        double ln2CostAtm = (currentThrust / 100f) * 2.0f * maturityMod * KEDSettings.cryoSpinUpMultiplier;
+                        uiSpinUpReq = $"{ln2CostVac:F2} LN2";
+                        uiSpinUpReqAtm = $"{ln2CostAtm:F2} LN2";
                     }
                     else if (isAdv)
                     {
-                        double ecCost = (currentThrust / 10f) * 1.0f * maturityMod * KEDSettings.advancedSpinUpMultiplier;
-                        uiSpinUpReq = $"{ecCost:F2} EC";
+                        double ecCostVac = (currentThrust / 10f) * 1.0f * maturityMod * KEDSettings.advancedSpinUpMultiplier;
+                        double ecCostAtm = (currentThrust / 10f) * 2.0f * maturityMod * KEDSettings.advancedSpinUpMultiplier;
+                        uiSpinUpReq = $"{ecCostVac:F2} EC";
+                        uiSpinUpReqAtm = $"{ecCostAtm:F2} EC";
                     }
                 }
             }
@@ -1150,6 +1158,7 @@ namespace KerbalEngineDynamics
             Fields["uiTurbineStatus"].guiActive = showSpinUp;
             Fields["uiSpinUpReq"].guiActive = showSpinUp;
             Fields["uiSpinUpReq"].guiActiveEditor = showSpinUp;
+            Fields["uiSpinUpReqAtm"].guiActiveEditor = showSpinUp;
 
             // --- Telemetry: hidden by default until inspected ---
             if (IsFailed)
@@ -2626,13 +2635,17 @@ namespace KerbalEngineDynamics
                     // Base calculation: vacuum (P=0), level 0 maturity (Mod=1.2)
                     if (archetype == EngineArchetype.Bipropellant)
                     {
-                        double baseLn2 = (prefabEngine.maxThrust / 100f) * 1.0f * 1.2f * KEDSettings.cryoSpinUpMultiplier; 
-                        info += $"\n<color=#66ff66>Base Spin-up:</color> {baseLn2:F1} LN2";
+                        double baseLn2Vac = (prefabEngine.maxThrust / 100f) * 1.0f * 1.2f * KEDSettings.cryoSpinUpMultiplier; 
+                        double baseLn2Atm = (prefabEngine.maxThrust / 100f) * 2.0f * 1.2f * KEDSettings.cryoSpinUpMultiplier; 
+                        info += $"\n<color=#66ff66>Base Spin-up (Vac):</color> {baseLn2Vac:F1} LN2";
+                        info += $"\n<color=#66ff66>Base Spin-up (1 ATM):</color> {baseLn2Atm:F1} LN2";
                     }
                     else if (archetype == EngineArchetype.Advanced)
                     {
-                        double baseEc = (prefabEngine.maxThrust / 10f) * 1.0f * 1.2f * KEDSettings.advancedSpinUpMultiplier; 
-                        info += $"\n<color=#66ff66>Base Spin-up:</color> {baseEc:F1} EC";
+                        double baseEcVac = (prefabEngine.maxThrust / 10f) * 1.0f * 1.2f * KEDSettings.advancedSpinUpMultiplier; 
+                        double baseEcAtm = (prefabEngine.maxThrust / 10f) * 2.0f * 1.2f * KEDSettings.advancedSpinUpMultiplier; 
+                        info += $"\n<color=#66ff66>Base Spin-up (Vac):</color> {baseEcVac:F1} EC";
+                        info += $"\n<color=#66ff66>Base Spin-up (1 ATM):</color> {baseEcAtm:F1} EC";
                     }
                 }
             }
